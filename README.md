@@ -72,6 +72,8 @@ By default the scraper clicks **each candidate name** on Past applicants to read
 
 Deduplication key: `name + phone + email`.
 
+Downloaded CVs in `downloads/` are sent to the ATS API as base64 and stored in **Supabase** (`resumeUrl` on the candidate profile). Ensure Vercel has `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` configured on the ATS project.
+
 ## Verify `.env` password parsing
 
 ```bash

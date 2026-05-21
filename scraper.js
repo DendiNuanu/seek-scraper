@@ -716,18 +716,59 @@ async function scrapeJobsApplicants(page, context, network) {
   return candidates;
 }
 
+function guessResumeMimeType(fileName) {
+  const lower = (fileName || "").toLowerCase();
+  if (lower.endsWith(".pdf")) return "application/pdf";
+  if (lower.endsWith(".docx")) {
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  }
+  if (lower.endsWith(".doc")) return "application/msword";
+  return "application/pdf";
+}
+
+/** Attach base64 resume from local downloads/ for API upload to Supabase */
+function buildApiCandidatePayload(c) {
+  const payload = {
+    name: c.name,
+    email: c.email,
+    phone: c.phone,
+    appliedRole: c.appliedRole,
+    mostRecentRole: c.mostRecentRole,
+    seekStatus: c.seekStatus,
+    appliedAt: c.appliedAt,
+    profileUrl: c.profileUrl,
+    source: c.source,
+  };
+
+  if (c.resumeLocalPath && fs.existsSync(c.resumeLocalPath)) {
+    const buf = fs.readFileSync(c.resumeLocalPath);
+    payload.resumeBase64 = buf.toString("base64");
+    payload.resumeFileName = path.basename(c.resumeLocalPath);
+    payload.resumeMimeType = guessResumeMimeType(payload.resumeFileName);
+  }
+
+  return payload;
+}
+
 async function sendToNuanuATS(candidates) {
   if (candidates.length === 0) {
     console.log("⚠️  No candidates to send");
     return;
   }
 
+  const withResume = candidates.filter(
+    (c) => c.resumeLocalPath && fs.existsSync(c.resumeLocalPath),
+  ).length;
   console.log(`\n📤 Sending ${candidates.length} candidates to Nuanu ATS...`);
+  if (withResume > 0) {
+    console.log(`  📎 Including ${withResume} resume file(s) for Supabase upload`);
+  }
 
-  const batchSize = 5;
+  const apiCandidates = candidates.map(buildApiCandidatePayload);
+  const batchSize = withResume > 0 ? 2 : 5;
   const batches = [];
-  for (let i = 0; i < candidates.length; i += batchSize) {
-    batches.push(candidates.slice(i, i + batchSize));
+  for (let i = 0; i < apiCandidates.length; i += batchSize) {
+    batches.push(apiCandidates.slice(i, i + batchSize));
   }
 
   let totalImported = 0;
@@ -746,7 +787,7 @@ async function sendToNuanuATS(candidates) {
           "x-api-key": SCRAPER_CONFIG.nuanuApiKey,
         },
         body: JSON.stringify({ candidates: batch }),
-        signal: AbortSignal.timeout(120000),
+        signal: AbortSignal.timeout(batch.some((c) => c.resumeBase64) ? 180000 : 120000),
       });
 
       if (!response.ok) {
