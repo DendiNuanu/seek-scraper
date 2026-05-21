@@ -1,0 +1,21 @@
+{
+  "name": "seek-scraper",
+  "version": "1.0.0",
+  "description": "Scraper: SEEK Employer → Nuanu ATS",
+  "main": "scraper.js",
+  "type": "module",
+  "scripts": {
+    "start": "HEADLESS=false node scraper.js",
+    "login": "node login-save-session.js",
+    "scrape": "HEADLESS=false node scraper.js",
+    "debug": "HEADLESS=false SCRAPE_ONLY=true node scraper.js",
+    "dry-run": "SCRAPE_ONLY=true HEADLESS=false node scraper.js",
+    "setup": "npx playwright install chromium",
+    "test-api": "node test-api.js",
+    "test-env": "node -e \"import 'dotenv/config'; const p=process.env.SEEK_PASSWORD; console.log('length:', p?.length); console.log('endsWith#:', p?.endsWith('#'));\""
+  },
+  "dependencies": {
+    "playwright": "^1.44.0",
+    "dotenv": "^16.4.5"
+  }
+}

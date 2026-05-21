@@ -1,0 +1,7 @@
+node_modules/
+.env
+seek-auth.json
+seek-session-storage.json
+.seek-browser-profile/
+debug-screenshot.png
+downloads/
