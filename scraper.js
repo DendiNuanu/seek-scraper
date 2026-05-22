@@ -33,7 +33,9 @@ const SCRAPER_CONFIG = {
   scrapeJobs: process.env.SCRAPE_JOBS === "true",
   maxPages: parseInt(process.env.MAX_PAGES || "1", 10),
   maxJobs: parseInt(process.env.MAX_JOBS || "20", 10),
-  delayMs: parseInt(process.env.DELAY_MS || "2000", 10),
+  delayMs: parseInt(process.env.DELAY_MS || "3500", 10),
+  listSettleMs: parseInt(process.env.LIST_SETTLE_MS || "4500", 10),
+  profileSettleMs: parseInt(process.env.PROFILE_SETTLE_MS || "1200", 10),
   scrapeOnly: process.env.SCRAPE_ONLY === "true",
   /** Open each candidate profile for email + resume (default on; set false to skip) */
   fetchContactDetails: process.env.FETCH_CONTACT_DETAILS !== "false",
@@ -176,20 +178,18 @@ async function scrapeCandidatesPage(page, context) {
     await ensureStillLoggedIn(context, page);
     await ensurePastApplicantsTab(page);
 
-    await page
-      .waitForSelector('a[href^="tel:"]', { timeout: 35000 })
-      .catch(() => console.log("  Waiting for phone links timed out"));
-
-    await delay(1500);
+    await waitForCandidatesListReady(page);
 
     const pageCandidates = await page.evaluate(extractYourCandidatesFromDom);
 
     console.log(`  Found ${pageCandidates.length} candidates on page ${pageNum}`);
 
     if (pageCandidates.length > 0) {
-      for (const c of pageCandidates.slice(0, 5)) {
+      const top = pageCandidates.slice(0, 6);
+      console.log(`  📌 List order (top = newest on SEEK):`);
+      for (const c of top) {
         console.log(
-          `    • ${c.name} | ${c.phone} | applied: ${c.appliedRole || "—"} | ${c.seekStatus}`,
+          `    • ${c.name} | ${c.phone} | applied: ${c.appliedRole || "—"} | ${c.seekStatus} | ${c.appliedAt}`,
         );
       }
       if (pageCandidates.length > 5) {
@@ -311,10 +311,46 @@ async function waitForCandidateDetailModal(page) {
       () =>
         document.querySelector('a[href^="mailto:"]') ||
         document.querySelector("#braid-modal-container h1, #braid-modal-container h2"),
-      { timeout: 20000 },
+      { timeout: 25000 },
     )
     .catch(() => {});
-  await delay(800);
+  await delay(SCRAPER_CONFIG.profileSettleMs);
+}
+
+async function waitForCandidatesListReady(page) {
+  await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+  await delay(400);
+
+  await page
+    .waitForFunction(
+      () => {
+        const links = document.querySelectorAll('a[href^="tel:"]');
+        if (links.length === 0) return false;
+        const first = links[0];
+        const row = first.closest("tr") || first.closest('[role="row"]') || first.parentElement;
+        const text = (row?.innerText || "").trim();
+        return text.length > 20 && /\+?\d/.test(text);
+      },
+      { timeout: 40000 },
+    )
+    .catch(() => console.log("  Waiting for candidate rows timed out"));
+
+  // Let SEEK finish rendering the first (newest) rows
+  let lastCount = 0;
+  let stablePasses = 0;
+  for (let i = 0; i < 12; i++) {
+    const count = await page
+      .locator('a[href^="tel:"]')
+      .count()
+      .catch(() => 0);
+    if (count === lastCount && count > 0) stablePasses++;
+    else stablePasses = 0;
+    lastCount = count;
+    if (stablePasses >= 2) break;
+    await delay(600);
+  }
+
+  await delay(SCRAPER_CONFIG.listSettleMs);
 }
 
 async function downloadResumeFromModal(page, candidateName) {
@@ -716,6 +752,39 @@ async function scrapeJobsApplicants(page, context, network) {
   return candidates;
 }
 
+/** Convert SEEK relative strings ("3 hours ago") to ISO for ATS sorting */
+function parseRelativeAppliedAtToIso(relative) {
+  const now = new Date();
+  if (!relative) return now.toISOString();
+
+  const s = String(relative).toLowerCase().trim();
+  if (s === "today") return now.toISOString();
+  if (s === "yesterday") {
+    const d = new Date(now);
+    d.setDate(d.getDate() - 1);
+    return d.toISOString();
+  }
+
+  const m = s.match(
+    /(\d+)\s*(minute|hour|day|week|month)s?\s*ago|(\d+)\s*(minutes?|hours?|days?|weeks?|months?)\s*ago/i,
+  );
+  if (m) {
+    const n = parseInt(m[1] || m[3], 10);
+    const unit = (m[2] || m[4] || "").toLowerCase();
+    const d = new Date(now);
+    if (unit.startsWith("minute")) d.setMinutes(d.getMinutes() - n);
+    else if (unit.startsWith("hour")) d.setHours(d.getHours() - n);
+    else if (unit.startsWith("day")) d.setDate(d.getDate() - n);
+    else if (unit.startsWith("week")) d.setDate(d.getDate() - n * 7);
+    else if (unit.startsWith("month")) d.setMonth(d.getMonth() - n);
+    return d.toISOString();
+  }
+
+  const parsed = new Date(relative);
+  if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+  return now.toISOString();
+}
+
 function guessResumeMimeType(fileName) {
   const lower = (fileName || "").toLowerCase();
   if (lower.endsWith(".pdf")) return "application/pdf";
@@ -735,7 +804,7 @@ function buildApiCandidatePayload(c) {
     appliedRole: c.appliedRole,
     mostRecentRole: c.mostRecentRole,
     seekStatus: c.seekStatus,
-    appliedAt: c.appliedAt,
+    appliedAt: parseRelativeAppliedAtToIso(c.appliedAt),
     profileUrl: c.profileUrl,
     source: c.source,
   };
@@ -852,6 +921,7 @@ async function main() {
     console.log("  Mode:        SCRAPE_ONLY (no API POST)");
   }
   console.log(`  Headless:    ${SCRAPER_CONFIG.headless}`);
+  console.log(`  Delays:      list=${SCRAPER_CONFIG.listSettleMs}ms profile=${SCRAPER_CONFIG.profileSettleMs}ms between=${SCRAPER_CONFIG.delayMs}ms`);
   console.log(`  Max Pages:   ${SCRAPER_CONFIG.maxPages}`);
   console.log(`  Max Jobs:    ${SCRAPER_CONFIG.maxJobs}`);
   console.log(`  Profiles:    ${SCRAPER_CONFIG.fetchContactDetails ? "email + resume per candidate" : "list only"}`);

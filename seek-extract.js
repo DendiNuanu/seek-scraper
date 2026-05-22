@@ -311,12 +311,15 @@ export function extractYourCandidatesFromDom() {
   };
 
   const isLikelyPersonName = (name) => {
-    if (!name || name.length < 4) return false;
+    if (!name || name.length < 3) return false;
     if (/^(South|West|North|East|Sarjana|Diploma|Magister|Bali|Jakarta)/i.test(name)) return false;
     if (/,\s*\d{4}/.test(name)) return false;
-    const words = name.trim().split(/\s+/);
-    if (words.length === 1 && words[0].length < 5) return false;
-    return /[a-zA-Z]/.test(name) && words.every((w) => w.length > 1);
+    const words = name.trim().split(/\s+/).filter(Boolean);
+    if (words.length < 2) return false;
+    if (!/[a-zA-Z]/.test(name)) return false;
+    // SEEK sometimes shows a trailing initial only (e.g. "Feri Budi p")
+    const core = words.filter((w) => w.length > 1);
+    return core.length >= 2;
   };
 
   const findRowContainer = (phoneLink) => {
@@ -339,9 +342,17 @@ export function extractYourCandidatesFromDom() {
   const results = [];
   const seen = new Set();
 
-  const phoneLinks = [...document.querySelectorAll('a[href^="tel:"]')];
+  // Process rows top-to-bottom (newest applications appear first on SEEK)
+  const phoneLinks = [...document.querySelectorAll('a[href^="tel:"]')]
+    .map((link) => {
+      const rect = link.getBoundingClientRect();
+      return { link, top: rect.top, left: rect.left };
+    })
+    .sort((a, b) => a.top - b.top || a.left - b.left)
+    .map((x) => x.link);
 
-  for (const phoneLink of phoneLinks) {
+  for (let rowIndex = 0; rowIndex < phoneLinks.length; rowIndex++) {
+    const phoneLink = phoneLinks[rowIndex];
     const container = findRowContainer(phoneLink);
     if (!container) continue;
 
@@ -411,6 +422,7 @@ export function extractYourCandidatesFromDom() {
       mostRecentRole: mostRecentRole || null,
       appliedRole,
       appliedAt: parseRelativeTime(rowText),
+      appliedAtSort: rowIndex,
       profileUrl,
       jobId,
       source: "SEEK",
