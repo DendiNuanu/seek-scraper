@@ -19,29 +19,59 @@ import {
   extractCandidateDetailFromModal,
   extractJobIdsFromPageHtml,
   extractYourCandidatesFromDom,
+  mergeApiFieldsIntoCandidate,
 } from "./seek-extract.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DOWNLOADS_DIR = path.join(__dirname, "downloads");
 
+const CHECKPOINT_PATH =
+  process.env.SCRAPE_CHECKPOINT || path.join(__dirname, "scrape-checkpoint.json");
+
+/** Phase 1: fast list only. Phase 2: TURBO_ENRICH=true for email+location+resume */
+const TURBO_MODE = process.env.TURBO_MODE === "true";
+
 const SCRAPER_CONFIG = {
   nuanuApiUrl: process.env.NUANU_API_URL,
   nuanuApiKey: process.env.NUANU_API_KEY,
-  /** SEEK requires visible browser to sign in */
   headless: process.env.HEADLESS === "true",
-  /** Only your-candidates by default — set SCRAPE_JOBS=true to also scan job pipelines */
   scrapeJobs: process.env.SCRAPE_JOBS === "true",
-  maxPages: parseInt(process.env.MAX_PAGES || "1", 10),
+  startPage: Math.max(1, parseInt(process.env.START_PAGE || "1", 10)),
+  maxPages: Math.min(500, Math.max(1, parseInt(process.env.MAX_PAGES || "1", 10))),
+  maxAgeMonths: Math.max(0, parseInt(process.env.MAX_AGE_MONTHS || "0", 10)),
   maxJobs: parseInt(process.env.MAX_JOBS || "20", 10),
-  delayMs: parseInt(process.env.DELAY_MS || "3500", 10),
-  listSettleMs: parseInt(process.env.LIST_SETTLE_MS || "4500", 10),
-  profileSettleMs: parseInt(process.env.PROFILE_SETTLE_MS || "1200", 10),
+  delayMs: TURBO_MODE
+    ? parseInt(process.env.DELAY_MS || "1200", 10)
+    : parseInt(process.env.DELAY_MS || "3500", 10),
+  listSettleMs: TURBO_MODE
+    ? parseInt(process.env.LIST_SETTLE_MS || "2000", 10)
+    : parseInt(process.env.LIST_SETTLE_MS || "4500", 10),
+  profileSettleMs: TURBO_MODE
+    ? parseInt(process.env.PROFILE_SETTLE_MS || "700", 10)
+    : parseInt(process.env.PROFILE_SETTLE_MS || "1200", 10),
   scrapeOnly: process.env.SCRAPE_ONLY === "true",
-  /** Open each candidate profile for email + resume (default on; set false to skip) */
-  fetchContactDetails: process.env.FETCH_CONTACT_DETAILS !== "false",
+  fetchContactDetails: TURBO_MODE
+    ? process.env.FETCH_CONTACT_DETAILS === "true"
+    : process.env.FETCH_CONTACT_DETAILS !== "false",
   maxDetailCandidates: parseInt(process.env.MAX_DETAIL_CANDIDATES || "0", 10),
   jobSiteManager: process.env.SEEK_JOB_SITE_MANAGER || "",
   jobAccountingOfficer: process.env.SEEK_JOB_ACCOUNTING_OFFICER || "",
+  resumeCheckpoint: process.env.RESUME_CHECKPOINT === "true",
+  saveCheckpoint: process.env.SAVE_CHECKPOINT !== "false",
+  /** Phase 2: enrich checkpoint (email, phone, location, resume) then optional ATS import */
+  turboEnrich: process.env.TURBO_ENRICH === "true",
+  turboEnrichCheckpoint:
+    process.env.TURBO_ENRICH_CHECKPOINT || CHECKPOINT_PATH,
+  /** Scrape N list pages at once (same login; do not use with fetchContactDetails on list) */
+  parallelListPages: Math.min(
+    5,
+    Math.max(1, parseInt(process.env.PARALLEL_LIST_PAGES || "1", 10)),
+  ),
+  /** Phase 2: open profile URLs on N browser tabs in parallel (2–3 recommended) */
+  enrichConcurrency: Math.min(
+    4,
+    Math.max(1, parseInt(process.env.ENRICH_CONCURRENCY || "2", 10)),
+  ),
 };
 
 if (!SCRAPER_CONFIG.scrapeOnly && (!SCRAPER_CONFIG.nuanuApiUrl || !SCRAPER_CONFIG.nuanuApiKey)) {
@@ -153,72 +183,208 @@ async function dismissSeekOverlays(page) {
   }
 }
 
-async function scrapeCandidatesPage(page, context) {
-  const candidates = [];
-  let totalDetailOpens = 0;
+async function scrapeOneListPage(page, context, pageNum, network) {
+  const url = SEEK.yourCandidatesPage(pageNum);
+  console.log(`📄 Page ${pageNum}/${SCRAPER_CONFIG.maxPages}: ${url}`);
 
-  console.log("📋 Scraping https://id.employer.seek.com/your-candidates?page=N only");
+  await dismissSeekOverlays(page);
+  await gotoSeekPage(page, url);
+
+  if (!page.url().includes("your-candidates")) {
+    console.log("  ↻ Wrong page after navigation — reopening your-candidates");
+    await gotoSeekPage(page, url);
+  }
+
+  await ensureStillLoggedIn(context, page);
+  await ensurePastApplicantsTab(page);
+  await waitForCandidatesListReady(page);
+
+  const pageCandidates = await page.evaluate(extractYourCandidatesFromDom);
+  console.log(`  Found ${pageCandidates.length} candidates on page ${pageNum}`);
+
+  if (pageCandidates.length === 0) {
+    if (pageNum === SCRAPER_CONFIG.startPage) {
+      await logDomDiagnostics(page, "your-candidates");
+    }
+    return { empty: true, reachedAgeCutoff: false, withinWindow: [], pageCandidates };
+  }
+
+  const withinWindow =
+    SCRAPER_CONFIG.maxAgeMonths > 0
+      ? pageCandidates.filter((c) =>
+          isWithinMaxAgeMonths(c.appliedAt, SCRAPER_CONFIG.maxAgeMonths),
+        )
+      : pageCandidates;
+
+  const skippedByAge = pageCandidates.length - withinWindow.length;
+  if (skippedByAge > 0) {
+    console.log(
+      `  ⏳ Skipped ${skippedByAge} on this page (older than ${SCRAPER_CONFIG.maxAgeMonths} months)`,
+    );
+  }
+
+  const oldestOnPage = pageCandidates[pageCandidates.length - 1];
+  const reachedAgeCutoff =
+    SCRAPER_CONFIG.maxAgeMonths > 0 &&
+    oldestOnPage &&
+    !isWithinMaxAgeMonths(oldestOnPage.appliedAt, SCRAPER_CONFIG.maxAgeMonths);
+
+  if (SCRAPER_CONFIG.fetchContactDetails && withinWindow.length > 0) {
+    fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
+    await enrichYourCandidatesOnPage(page, withinWindow, 0, url, network);
+  }
+
+  return { empty: false, reachedAgeCutoff, withinWindow, pageCandidates };
+}
+
+async function scrapeCandidatesPage(page, context, network) {
+  let candidates = [];
+  let consecutiveEmpty = 0;
+
+  const checkpoint = SCRAPER_CONFIG.resumeCheckpoint ? loadScrapeCheckpoint() : null;
+  let pageNum = SCRAPER_CONFIG.startPage;
+
+  if (checkpoint?.candidates?.length) {
+    candidates = checkpoint.candidates;
+    pageNum = (checkpoint.lastPage || SCRAPER_CONFIG.startPage) + 1;
+    console.log(
+      `  📂 Resuming checkpoint: ${candidates.length} candidates, starting at page ${pageNum}`,
+    );
+  }
+
+  console.log("📋 Scraping https://id.employer.seek.com/your-candidates?page=N");
+  console.log(
+    `  Pages: ${pageNum}–${SCRAPER_CONFIG.maxPages}` +
+      (SCRAPER_CONFIG.maxAgeMonths > 0
+        ? ` (stop after ~${SCRAPER_CONFIG.maxAgeMonths} months)`
+        : ""),
+  );
+  if (SCRAPER_CONFIG.parallelListPages > 1) {
+    console.log(`  ⚡ Parallel list tabs: ${SCRAPER_CONFIG.parallelListPages}`);
+  }
   if (SCRAPER_CONFIG.fetchContactDetails) {
     console.log("  📇 Will open each candidate profile for email + resume download");
     fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
+  } else {
+    console.log("  ⚡ List only (no profile opens on this run)");
   }
 
-  for (let pageNum = 1; pageNum <= SCRAPER_CONFIG.maxPages; pageNum++) {
-    const url = SEEK.yourCandidatesPage(pageNum);
-    console.log(`📄 Page ${pageNum}: ${url}`);
+  const parallel = SCRAPER_CONFIG.parallelListPages;
 
-    await dismissSeekOverlays(page);
-    await gotoSeekPage(page, url);
-
-    if (!page.url().includes("your-candidates")) {
-      console.log("  ↻ Wrong page after navigation — reopening your-candidates");
-      await gotoSeekPage(page, url);
+  for (; pageNum <= SCRAPER_CONFIG.maxPages; ) {
+    const batchNums = [];
+    for (let i = 0; i < parallel && pageNum + i <= SCRAPER_CONFIG.maxPages; i++) {
+      batchNums.push(pageNum + i);
     }
 
-    await ensureStillLoggedIn(context, page);
-    await ensurePastApplicantsTab(page);
+    let results;
+    if (parallel > 1 && !SCRAPER_CONFIG.fetchContactDetails) {
+      const tabs = await Promise.all(
+        batchNums.map(async (num) => {
+          const tab = await context.newPage();
+          await attachNetworkSniffer(tab, network);
+          const result = await scrapeOneListPage(tab, context, num, network);
+          await tab.close().catch(() => {});
+          return { pageNum: num, ...result };
+        }),
+      );
+      results = tabs;
+    } else {
+      results = [
+        {
+          pageNum: batchNums[0],
+          ...(await scrapeOneListPage(page, context, batchNums[0], network)),
+        },
+      ];
+      pageNum = batchNums[0];
+    }
 
-    await waitForCandidatesListReady(page);
+    let stopRun = false;
+    for (const result of results) {
+      const num = result.pageNum;
+      if (result.empty) {
+        consecutiveEmpty++;
+        if (consecutiveEmpty >= 2) {
+          console.log(
+            `  ⏹ Stopping: ${consecutiveEmpty} empty pages in a row (end of SEEK list)`,
+          );
+          stopRun = true;
+          break;
+        }
+        continue;
+      }
+      consecutiveEmpty = 0;
+      mergeCandidates(candidates, result.withinWindow);
+      saveScrapeCheckpoint(candidates, num);
 
-    const pageCandidates = await page.evaluate(extractYourCandidatesFromDom);
-
-    console.log(`  Found ${pageCandidates.length} candidates on page ${pageNum}`);
-
-    if (pageCandidates.length > 0) {
-      const top = pageCandidates.slice(0, 6);
-      console.log(`  📌 List order (top = newest on SEEK):`);
-      for (const c of top) {
+      if (result.reachedAgeCutoff) {
         console.log(
-          `    • ${c.name} | ${c.phone} | applied: ${c.appliedRole || "—"} | ${c.seekStatus} | ${c.appliedAt}`,
+          `  ⏹ Stopping: reached ${SCRAPER_CONFIG.maxAgeMonths}-month cutoff on page ${num}`,
         );
-      }
-      if (pageCandidates.length > 5) {
-        console.log(`    … and ${pageCandidates.length - 5} more on this page`);
-      }
-    } else if (pageNum === 1) {
-      await logDomDiagnostics(page, "your-candidates");
-    }
-
-    if (SCRAPER_CONFIG.fetchContactDetails && pageCandidates.length > 0) {
-      const budget =
-        SCRAPER_CONFIG.maxDetailCandidates > 0
-          ? Math.max(0, SCRAPER_CONFIG.maxDetailCandidates - totalDetailOpens)
-          : pageCandidates.length;
-      if (budget > 0) {
-        const { detailCount } = await enrichYourCandidatesOnPage(
-          page,
-          pageCandidates,
-          budget,
-          url,
-        );
-        totalDetailOpens += detailCount;
+        stopRun = true;
+        break;
       }
     }
 
-    mergeCandidates(candidates, pageCandidates);
+    pageNum = batchNums[batchNums.length - 1] + 1;
+    if (stopRun) break;
   }
 
   return candidates;
+}
+
+/**
+ * Phase 2: open saved profileUrl for each row → email, phone, location, resume PDF.
+ * Uses multiple browser tabs (ENRICH_CONCURRENCY) — much faster than one-by-one list clicks.
+ */
+async function enrichCheckpointCandidates(context, candidates, network) {
+  const queue = candidates.filter((c) => needsProfileEnrich(c) && c.profileUrl);
+  const noUrl = candidates.filter((c) => needsProfileEnrich(c) && !c.profileUrl);
+
+  console.log(`\n⚡ Profile enrich: ${queue.length} with profileUrl, ${noUrl.length} without URL`);
+  if (queue.length === 0) return 0;
+
+  fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
+
+  let index = 0;
+  let done = 0;
+  const workers = SCRAPER_CONFIG.enrichConcurrency;
+
+  async function worker(workerId) {
+    const page = await context.newPage();
+    await attachNetworkSniffer(page, network);
+
+    while (true) {
+      const i = index++;
+      if (i >= queue.length) break;
+
+      const candidate = queue[i];
+      console.log(
+        `  [w${workerId}] ${i + 1}/${queue.length} ${candidate.name}…`,
+      );
+
+      try {
+        await enrichFromProfileUrl(page, candidate, candidate.profileUrl, null, network);
+        done++;
+        if (done % 10 === 0) {
+          saveScrapeCheckpoint(candidates, loadScrapeCheckpoint()?.lastPage || 0);
+        }
+      } catch (err) {
+        console.log(`      ⚠️  ${err.message}`);
+      }
+
+      await delay(SCRAPER_CONFIG.delayMs);
+    }
+
+    await page.close().catch(() => {});
+  }
+
+  await Promise.all(
+    Array.from({ length: workers }, (_, workerId) => worker(workerId + 1)),
+  );
+
+  saveScrapeCheckpoint(candidates, loadScrapeCheckpoint()?.lastPage || 0);
+  return done;
 }
 
 async function collectJobIdsFromPage(page, network) {
@@ -404,7 +570,9 @@ async function closeCandidateDetail(page, returnUrl) {
   }
 }
 
-async function captureProfileDetails(page, candidate) {
+async function captureProfileDetails(page, candidate, network) {
+  if (network) drainNetworkCandidatesInto(network, candidate);
+
   const detail = await fetchContactFromDetailPanel(page);
   if (detail.email) candidate.email = detail.email;
   if (detail.phone) candidate.phone = detail.phone;
@@ -415,6 +583,8 @@ async function captureProfileDetails(page, candidate) {
     console.log(`      📍 ${detail.location}`);
   }
 
+  if (network) drainNetworkCandidatesInto(network, candidate);
+
   const resumePath = await downloadResumeFromModal(page, candidate.name);
   if (resumePath) {
     candidate.resumeLocalPath = resumePath;
@@ -424,12 +594,12 @@ async function captureProfileDetails(page, candidate) {
   return Boolean(candidate.email);
 }
 
-async function enrichFromProfileUrl(page, candidate, profileUrl, returnUrl) {
+async function enrichFromProfileUrl(page, candidate, profileUrl, returnUrl, network) {
   await dismissSeekOverlays(page);
   await safeGoto(page, profileUrl);
   await waitForCandidateDetailModal(page);
 
-  const ok = await captureProfileDetails(page, candidate);
+  const ok = await captureProfileDetails(page, candidate, network);
   if (ok) {
     console.log(`      ✉️  ${candidate.email} | ${candidate.phone || "—"}`);
   } else {
@@ -440,10 +610,16 @@ async function enrichFromProfileUrl(page, candidate, profileUrl, returnUrl) {
   return ok;
 }
 
-async function openCandidateProfile(page, candidate, returnUrl) {
+async function openCandidateProfile(page, candidate, returnUrl, network) {
   try {
     if (candidate.profileUrl) {
-      return enrichFromProfileUrl(page, candidate, candidate.profileUrl, returnUrl);
+      return enrichFromProfileUrl(
+        page,
+        candidate,
+        candidate.profileUrl,
+        returnUrl,
+        network,
+      );
     }
 
     const digits = phoneDigits(candidate.phone);
@@ -454,7 +630,7 @@ async function openCandidateProfile(page, candidate, returnUrl) {
     if (!clickResult?.ok) return false;
 
     await waitForCandidateDetailModal(page);
-    const ok = await captureProfileDetails(page, candidate);
+    const ok = await captureProfileDetails(page, candidate, network);
     if (ok) {
       console.log(`      ✉️  ${candidate.email} (${clickResult.method})`);
     }
@@ -587,7 +763,8 @@ async function enrichCandidatesViaJobPipelines(page, context, candidates, networ
 
       console.log(`    👤 ${candidate.name}…`);
       try {
-        if (await enrichFromProfileUrl(page, candidate, profileUrl, null)) enriched++;
+        if (await enrichFromProfileUrl(page, candidate, profileUrl, null, network))
+          enriched++;
       } catch (err) {
         console.log(`      ⚠️  ${err.message}`);
       }
@@ -598,7 +775,13 @@ async function enrichCandidatesViaJobPipelines(page, context, candidates, networ
   return enriched;
 }
 
-async function enrichYourCandidatesOnPage(page, pageCandidates, maxToOpen, listPageUrl) {
+async function enrichYourCandidatesOnPage(
+  page,
+  pageCandidates,
+  maxToOpen,
+  listPageUrl,
+  network,
+) {
   let enriched = 0;
   let detailCount = 0;
 
@@ -611,7 +794,7 @@ async function enrichYourCandidatesOnPage(page, pageCandidates, maxToOpen, listP
     await dismissSeekOverlays(page);
 
     detailCount++;
-    const gotEmail = await openCandidateProfile(page, candidate, listPageUrl);
+    const gotEmail = await openCandidateProfile(page, candidate, listPageUrl, network);
     if (gotEmail) enriched++;
     else if (!candidate.profileUrl) {
       console.log(`      ⚠️  Could not open profile for ${label} (will retry via job pipeline)`);
@@ -757,21 +940,21 @@ async function scrapeJobsApplicants(page, context, network) {
   return candidates;
 }
 
-/** Convert SEEK relative strings ("3 hours ago") to ISO for ATS sorting */
-function parseRelativeAppliedAtToIso(relative) {
+/** Convert SEEK relative strings ("3 hours ago", "6 months ago") to a Date */
+function parseRelativeAppliedAtToDate(relative) {
   const now = new Date();
-  if (!relative) return now.toISOString();
+  if (!relative) return now;
 
   const s = String(relative).toLowerCase().trim();
-  if (s === "today") return now.toISOString();
+  if (s === "today") return now;
   if (s === "yesterday") {
     const d = new Date(now);
     d.setDate(d.getDate() - 1);
-    return d.toISOString();
+    return d;
   }
 
   const m = s.match(
-    /(\d+)\s*(minute|hour|day|week|month)s?\s*ago|(\d+)\s*(minutes?|hours?|days?|weeks?|months?)\s*ago/i,
+    /(\d+)\s*(minute|hour|day|week|month|year)s?\s*ago|(\d+)\s*(minutes?|hours?|days?|weeks?|months?|years?)\s*ago/i,
   );
   if (m) {
     const n = parseInt(m[1] || m[3], 10);
@@ -782,12 +965,78 @@ function parseRelativeAppliedAtToIso(relative) {
     else if (unit.startsWith("day")) d.setDate(d.getDate() - n);
     else if (unit.startsWith("week")) d.setDate(d.getDate() - n * 7);
     else if (unit.startsWith("month")) d.setMonth(d.getMonth() - n);
-    return d.toISOString();
+    else if (unit.startsWith("year")) d.setFullYear(d.getFullYear() - n);
+    return d;
   }
 
   const parsed = new Date(relative);
-  if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
-  return now.toISOString();
+  if (!Number.isNaN(parsed.getTime())) return parsed;
+  return now;
+}
+
+function parseRelativeAppliedAtToIso(relative) {
+  return parseRelativeAppliedAtToDate(relative).toISOString();
+}
+
+function isWithinMaxAgeMonths(appliedAtLabel, maxAgeMonths) {
+  if (!maxAgeMonths || maxAgeMonths <= 0) return true;
+  const applied = parseRelativeAppliedAtToDate(appliedAtLabel);
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - maxAgeMonths);
+  return applied >= cutoff;
+}
+
+function loadScrapeCheckpoint(customPath) {
+  const p = customPath || CHECKPOINT_PATH;
+  if (!fs.existsSync(p)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(p, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function hasResumeOnDisk(c) {
+  return Boolean(c.resumeLocalPath && fs.existsSync(c.resumeLocalPath));
+}
+
+/** ATS needs: email, phone (list), domicile, resume file */
+function needsProfileEnrich(c) {
+  return (
+    !c.email ||
+    !c.location ||
+    !c.domicile ||
+    !hasResumeOnDisk(c)
+  );
+}
+
+function drainNetworkCandidatesInto(network, candidate) {
+  while (network.candidates.length > 0) {
+    const row = network.candidates.shift();
+    mergeApiFieldsIntoCandidate(candidate, row);
+  }
+}
+
+async function attachNetworkSniffer(page, network) {
+  page.on("response", network.onResponse);
+}
+
+function saveScrapeCheckpoint(candidates, lastPage) {
+  if (!SCRAPER_CONFIG.saveCheckpoint) return;
+  fs.writeFileSync(
+    CHECKPOINT_PATH,
+    JSON.stringify(
+      {
+        lastPage,
+        maxAgeMonths: SCRAPER_CONFIG.maxAgeMonths,
+        candidateCount: candidates.length,
+        savedAt: new Date().toISOString(),
+        candidates,
+      },
+      null,
+      2,
+    ),
+  );
 }
 
 function guessResumeMimeType(fileName) {
@@ -800,9 +1049,13 @@ function guessResumeMimeType(fileName) {
   return "application/pdf";
 }
 
-/** Keep each POST under Vercel's ~4.5MB body limit (base64 resumes are ~33% larger). */
+/** Vercel serverless body limit ~4.5MB — stay under 2.5MB per request to be safe. */
 const VERCEL_IMPORT_MAX_BYTES = parseInt(
-  process.env.IMPORT_BATCH_MAX_BYTES || "3200000",
+  process.env.IMPORT_BATCH_MAX_BYTES || "2500000",
+  10,
+);
+const VERCEL_SINGLE_CANDIDATE_MAX_BYTES = parseInt(
+  process.env.IMPORT_SINGLE_MAX_BYTES || "4200000",
   10,
 );
 
@@ -851,8 +1104,12 @@ async function postCandidateBatch(batch) {
   return response.json();
 }
 
+function payloadByteSize(payload) {
+  return Buffer.byteLength(JSON.stringify(payload), "utf8");
+}
+
 /** Attach base64 resume from local downloads/ for API upload to Supabase */
-function buildApiCandidatePayload(c) {
+function buildApiCandidatePayload(c, { includeResume = true } = {}) {
   const payload = {
     name: c.name,
     email: c.email,
@@ -867,14 +1124,69 @@ function buildApiCandidatePayload(c) {
     domicile: c.domicile || c.location || null,
   };
 
-  if (c.resumeLocalPath && fs.existsSync(c.resumeLocalPath)) {
+  if (includeResume && c.resumeLocalPath && fs.existsSync(c.resumeLocalPath)) {
     const buf = fs.readFileSync(c.resumeLocalPath);
-    payload.resumeBase64 = buf.toString("base64");
-    payload.resumeFileName = path.basename(c.resumeLocalPath);
-    payload.resumeMimeType = guessResumeMimeType(payload.resumeFileName);
+    const trial = {
+      ...payload,
+      resumeBase64: buf.toString("base64"),
+      resumeFileName: path.basename(c.resumeLocalPath),
+      resumeMimeType: guessResumeMimeType(path.basename(c.resumeLocalPath)),
+    };
+    if (payloadByteSize(trial) <= VERCEL_SINGLE_CANDIDATE_MAX_BYTES) {
+      Object.assign(payload, {
+        resumeBase64: trial.resumeBase64,
+        resumeFileName: trial.resumeFileName,
+        resumeMimeType: trial.resumeMimeType,
+      });
+    }
   }
 
   return payload;
+}
+
+async function postCandidateBatchWith413Fallback(batch) {
+  try {
+    return await postCandidateBatch(batch);
+  } catch (err) {
+    if (err.status !== 413) throw err;
+
+    if (batch.length > 1) {
+      console.log(`  ⚠️  Batch too large — retrying ${batch.length} candidates one-by-one…`);
+      const merged = { results: { imported: 0, skipped: 0, errors: 0, details: [] } };
+      for (const single of batch) {
+        try {
+          const one = await postCandidateBatchWith413Fallback([single]);
+          merged.results.imported += one.results?.imported || 0;
+          merged.results.skipped += one.results?.skipped || 0;
+          merged.results.errors += one.results?.errors || 0;
+          if (Array.isArray(one.results?.details)) {
+            merged.results.details.push(...one.results.details);
+          }
+        } catch (singleErr) {
+          merged.results.errors += 1;
+          merged.results.details.push(
+            `ERROR: ${single.name || "Unknown"} — ${singleErr.message}`,
+          );
+        }
+        await delay(500);
+      }
+      return merged;
+    }
+
+    const only = batch[0];
+    if (only?.resumeBase64) {
+      console.log(
+        `  ⚠️  CV too large for ${only.name || "candidate"} — importing without resume in payload`,
+      );
+      const slim = { ...only };
+      delete slim.resumeBase64;
+      delete slim.resumeFileName;
+      delete slim.resumeMimeType;
+      return await postCandidateBatch([slim]);
+    }
+
+    throw err;
+  }
 }
 
 async function sendToNuanuATS(candidates) {
@@ -903,34 +1215,7 @@ async function sendToNuanuATS(candidates) {
     console.log(`  Sending batch ${i + 1}/${batches.length} (${batch.length} candidates)...`);
 
     try {
-      let result;
-      try {
-        result = await postCandidateBatch(batch);
-      } catch (err) {
-        if (err.status === 413 && batch.length > 1) {
-          console.log(`  ⚠️  Batch too large — retrying ${batch.length} candidates one-by-one…`);
-          result = { results: { imported: 0, skipped: 0, errors: 0, details: [] } };
-          for (const single of batch) {
-            try {
-              const one = await postCandidateBatch([single]);
-              result.results.imported += one.results?.imported || 0;
-              result.results.skipped += one.results?.skipped || 0;
-              result.results.errors += one.results?.errors || 0;
-              if (Array.isArray(one.results?.details)) {
-                result.results.details.push(...one.results.details);
-              }
-            } catch (singleErr) {
-              result.results.errors += 1;
-              result.results.details.push(
-                `ERROR: ${single.name || "Unknown"} — ${singleErr.message}`,
-              );
-            }
-            await delay(500);
-          }
-        } else {
-          throw err;
-        }
-      }
+      const result = await postCandidateBatchWith413Fallback(batch);
       console.log(
         `  ✅ Batch ${i + 1}: ${result.results?.imported ?? 0} imported, ${result.results?.skipped ?? 0} skipped, ${result.results?.errors ?? 0} errors`,
       );
@@ -977,7 +1262,54 @@ function logCandidateNames(candidates) {
 }
 
 async function main() {
+  if (SCRAPER_CONFIG.turboEnrich) {
+    const cpPath = SCRAPER_CONFIG.turboEnrichCheckpoint;
+    console.log("⚡ PHASE 2 — Enrich checkpoint (email, location, resume)");
+    console.log(`  Checkpoint: ${cpPath}`);
+    const cp = loadScrapeCheckpoint(cpPath);
+    if (!cp?.candidates?.length) {
+      console.error("❌ No candidates in checkpoint. Run phase 1 first (npm run turbo-list).");
+      process.exit(1);
+    }
+    const allCands = cp.candidates;
+    const need = allCands.filter(needsProfileEnrich);
+    console.log(
+      `  Total: ${allCands.length} | need enrich: ${need.length} (missing email, location, or resume)`,
+    );
+
+    const context = await launchSeekBrowser({ headless: SCRAPER_CONFIG.headless });
+    const network = createNetworkCollector();
+    try {
+      await ensureSeekSession(context);
+      const enriched = await enrichCheckpointCandidates(context, allCands, network);
+      console.log(`  ✅ Enriched ${enriched} profiles`);
+
+      const stillNeed = allCands.filter((c) => !c.email);
+      if (stillNeed.length > 0) {
+        const page = await context.newPage();
+        await attachNetworkSniffer(page, network);
+        console.log(`\n--- Job pipeline fallback (${stillNeed.length} without email) ---`);
+        await enrichCandidatesViaJobPipelines(page, context, allCands, network);
+        await page.close().catch(() => {});
+      }
+
+      saveScrapeCheckpoint(allCands, cp.lastPage || 0);
+      const deduped = dedupeCandidates(allCands);
+      if (!SCRAPER_CONFIG.scrapeOnly) {
+        await sendToNuanuATS(deduped);
+      } else {
+        console.log(`\n✅ Done. ${deduped.length} candidates in checkpoint (SCRAPE_ONLY).`);
+      }
+    } finally {
+      await context.close();
+    }
+    return;
+  }
+
   console.log("🚀 SEEK → Nuanu ATS Scraper Starting...");
+  if (TURBO_MODE) {
+    console.log("⚡ TURBO MODE — Phase 1 list fast; then run: npm run turbo-enrich");
+  }
   console.log("=========================================");
   console.log(`  SEEK Email:  ${CONFIG.seekEmail || "(not set)"}`);
   logPasswordDiagnostics();
@@ -988,9 +1320,17 @@ async function main() {
   }
   console.log(`  Headless:    ${SCRAPER_CONFIG.headless}`);
   console.log(`  Delays:      list=${SCRAPER_CONFIG.listSettleMs}ms profile=${SCRAPER_CONFIG.profileSettleMs}ms between=${SCRAPER_CONFIG.delayMs}ms`);
-  console.log(`  Max Pages:   ${SCRAPER_CONFIG.maxPages}`);
+  console.log(`  Pages:       ${SCRAPER_CONFIG.startPage} → ${SCRAPER_CONFIG.maxPages}`);
+  console.log(
+    `  Max age:     ${SCRAPER_CONFIG.maxAgeMonths > 0 ? `${SCRAPER_CONFIG.maxAgeMonths} months` : "off (all pages)"}`,
+  );
   console.log(`  Max Jobs:    ${SCRAPER_CONFIG.maxJobs}`);
-  console.log(`  Profiles:    ${SCRAPER_CONFIG.fetchContactDetails ? "email + resume per candidate" : "list only"}`);
+  if (SCRAPER_CONFIG.saveCheckpoint) {
+    console.log(`  Checkpoint:  ${CHECKPOINT_PATH}`);
+  }
+  console.log(
+    `  Profiles:    ${SCRAPER_CONFIG.fetchContactDetails ? "email + resume per candidate" : "⚡ list only"}`,
+  );
   if (SCRAPER_CONFIG.fetchContactDetails) {
     console.log(`  Resumes →   ${DOWNLOADS_DIR}`);
   }
@@ -1018,11 +1358,11 @@ async function main() {
       page = await ensureSeekSession(context);
     }
 
-    console.log("\n--- Your Candidates (Past applicants) ---");
-    const candidatesPageResults = await scrapeCandidatesPage(page, context);
-    allCandidates.push(...candidatesPageResults);
+    await attachNetworkSniffer(page, network);
 
-    page.on("response", network.onResponse);
+    console.log("\n--- Your Candidates (Past applicants) ---");
+    const candidatesPageResults = await scrapeCandidatesPage(page, context, network);
+    allCandidates.push(...candidatesPageResults);
 
     if (SCRAPER_CONFIG.fetchContactDetails) {
       const needEmail = () => allCandidates.filter((c) => !c.email).length;

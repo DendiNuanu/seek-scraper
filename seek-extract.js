@@ -117,6 +117,29 @@ function normalizeApiCandidate(obj) {
 
   const profileUrl = pickString(obj, ["profileUrl", "profile_url", "url", "link"]);
 
+  const location =
+    pickString(obj, [
+      "location",
+      "domicile",
+      "address",
+      "suburb",
+      "city",
+      "state",
+      "region",
+      "homeLocation",
+      "home_location",
+    ]) || null;
+
+  const resumeUrl =
+    pickString(obj, [
+      "resumeUrl",
+      "resume_url",
+      "cvUrl",
+      "cv_url",
+      "documentUrl",
+      "document_url",
+    ]) || null;
+
   const hasApplicationFields =
     email ||
     phone ||
@@ -140,8 +163,27 @@ function normalizeApiCandidate(obj) {
     mostRecentRole: pickString(obj, ["mostRecentRole", "most_recent_role", "currentRole"]) || null,
     appliedAt: pickString(obj, ["appliedAt", "applied_at", "createdAt", "created_at"]) || new Date().toISOString(),
     profileUrl: profileUrl || null,
+    location,
+    domicile: location,
+    resumeUrl,
     source: "SEEK",
   };
+}
+
+/** Merge richer fields from intercepted SEEK JSON into an in-memory candidate row. */
+export function mergeApiFieldsIntoCandidate(target, apiRow) {
+  if (!target || !apiRow) return target;
+  if (apiRow.email) target.email = apiRow.email;
+  if (apiRow.phone) target.phone = apiRow.phone;
+  if (apiRow.location) {
+    target.location = apiRow.location;
+    target.domicile = apiRow.domicile || apiRow.location;
+  }
+  if (apiRow.profileUrl) target.profileUrl = apiRow.profileUrl;
+  if (apiRow.resumeUrl) target.resumeUrl = apiRow.resumeUrl;
+  if (apiRow.seekStatus) target.seekStatus = apiRow.seekStatus;
+  if (apiRow.appliedRole) target.appliedRole = apiRow.appliedRole;
+  return target;
 }
 
 function normalizeApiJob(obj) {

@@ -58,6 +58,75 @@ npm run debug
 # or HEADLESS=false in .env for first automated attempt
 ```
 
+### Scrape up to 6 months (many pages)
+
+SEEK **Past applicants** uses `https://id.employer.seek.com/your-candidates?page=2` (and higher). The scraper walks pages **newest → oldest** and stops when:
+
+- A row is older than `MAX_AGE_MONTHS` (default off), or
+- Two pages in a row have no rows (end of list), or
+- `MAX_PAGES` is reached (cap 500).
+
+**Recommended for a first long run** (list only — fast, no CV download):
+
+```bash
+npm run scrape-6mo-list
+```
+
+**Full import** (email + resume per person — can take many hours):
+
+```bash
+npm run scrape-6mo
+```
+
+Or set in `.env`:
+
+```env
+MAX_PAGES=40
+MAX_AGE_MONTHS=6
+START_PAGE=1
+```
+
+Progress is saved to `scrape-checkpoint.json` after each page. If the run stops, resume with:
+
+```env
+RESUME_CHECKPOINT=true
+```
+
+Optional: `FETCH_CONTACT_DETAILS=false` with `MAX_PAGES=40` to collect names/phones quickly, then run again with profiles only for missing emails (smaller `MAX_DETAIL_CANDIDATES`).
+
+### ⚡ TURBO workflow (email + location + resume for ATS)
+
+SEEK does **not** expose email/resume on the list page — only after opening each profile modal (or intercepting their internal JSON). There is **no official bulk resume ZIP**; the ⬇️ icon is per candidate.
+
+| What you need | How the scraper gets it |
+|---------------|-------------------------|
+| Phone | List page (fast) |
+| Email | Profile modal / job pipeline URL |
+| Location | Profile modal |
+| Resume PDF | Download button in profile modal |
+
+**Fastest reliable approach (built into `scraper.js`):**
+
+```bash
+# Phase 1 — list up to 40 pages in parallel tabs (~5–15 min). Saves scrape-checkpoint.json
+npm run resume-turbo          # you already have 630 rows at page 32 — continues from 33
+
+# Phase 2 — 2 browser tabs open profileUrl → email + location + resume (~hours for 1000s)
+npm run turbo-enrich          # imports to ATS when SCRAPE_ONLY=false
+
+# Test enrich only (no ATS):
+npm run turbo-enrich-only
+```
+
+**Can it run without a browser (CLI only)?**  
+Not for full data. SEEK uses Auth0 + anti-bot. You need a saved session (`npm run login`). Playwright is the “CLI” — headless after login is fine.
+
+**Is parallel scraping real?**  
+Yes for **list pages** (`PARALLEL_LIST_PAGES=3`) and **profile enrich** (`ENRICH_CONCURRENCY=2`). Same login session, multiple tabs. Do not run 10+ tabs or SEEK may block you.
+
+**SEEK CSV export?**  
+If your account has Export on Past applicants, that can supplement names — it usually does **not** include CV files. The scraper still needs profiles for resumes.
+
 ## SEEK pages scraped
 
 | Page | URL | What is extracted |
