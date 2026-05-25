@@ -412,6 +412,7 @@ async function captureProfileDetails(page, candidate) {
   if (detail.location) {
     candidate.location = detail.location;
     candidate.domicile = detail.location;
+    console.log(`      📍 ${detail.location}`);
   }
 
   const resumePath = await downloadResumeFromModal(page, candidate.name);
@@ -799,6 +800,57 @@ function guessResumeMimeType(fileName) {
   return "application/pdf";
 }
 
+/** Keep each POST under Vercel's ~4.5MB body limit (base64 resumes are ~33% larger). */
+const VERCEL_IMPORT_MAX_BYTES = parseInt(
+  process.env.IMPORT_BATCH_MAX_BYTES || "3200000",
+  10,
+);
+
+function buildImportBatches(apiCandidates) {
+  const batches = [];
+  let current = [];
+  let currentBytes = 2;
+
+  for (const candidate of apiCandidates) {
+    const candidateBytes = Buffer.byteLength(JSON.stringify(candidate), "utf8");
+    const wouldExceed =
+      current.length > 0 && currentBytes + candidateBytes > VERCEL_IMPORT_MAX_BYTES;
+
+    if (wouldExceed) {
+      batches.push(current);
+      current = [];
+      currentBytes = 2;
+    }
+
+    current.push(candidate);
+    currentBytes += candidateBytes;
+  }
+
+  if (current.length > 0) batches.push(current);
+  return batches.length > 0 ? batches : [[]];
+}
+
+async function postCandidateBatch(batch) {
+  const response = await fetch(SCRAPER_CONFIG.nuanuApiUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": SCRAPER_CONFIG.nuanuApiKey,
+    },
+    body: JSON.stringify({ candidates: batch }),
+    signal: AbortSignal.timeout(batch.some((c) => c.resumeBase64) ? 180000 : 120000),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    const err = new Error(`API returned ${response.status}: ${text}`);
+    err.status = response.status;
+    throw err;
+  }
+
+  return response.json();
+}
+
 /** Attach base64 resume from local downloads/ for API upload to Supabase */
 function buildApiCandidatePayload(c) {
   const payload = {
@@ -840,11 +892,7 @@ async function sendToNuanuATS(candidates) {
   }
 
   const apiCandidates = candidates.map(buildApiCandidatePayload);
-  const batchSize = withResume > 0 ? 2 : 5;
-  const batches = [];
-  for (let i = 0; i < apiCandidates.length; i += batchSize) {
-    batches.push(apiCandidates.slice(i, i + batchSize));
-  }
+  const batches = buildImportBatches(apiCandidates);
 
   let totalImported = 0;
   let totalSkipped = 0;
@@ -855,22 +903,34 @@ async function sendToNuanuATS(candidates) {
     console.log(`  Sending batch ${i + 1}/${batches.length} (${batch.length} candidates)...`);
 
     try {
-      const response = await fetch(SCRAPER_CONFIG.nuanuApiUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": SCRAPER_CONFIG.nuanuApiKey,
-        },
-        body: JSON.stringify({ candidates: batch }),
-        signal: AbortSignal.timeout(batch.some((c) => c.resumeBase64) ? 180000 : 120000),
-      });
-
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`API returned ${response.status}: ${text}`);
+      let result;
+      try {
+        result = await postCandidateBatch(batch);
+      } catch (err) {
+        if (err.status === 413 && batch.length > 1) {
+          console.log(`  ⚠️  Batch too large — retrying ${batch.length} candidates one-by-one…`);
+          result = { results: { imported: 0, skipped: 0, errors: 0, details: [] } };
+          for (const single of batch) {
+            try {
+              const one = await postCandidateBatch([single]);
+              result.results.imported += one.results?.imported || 0;
+              result.results.skipped += one.results?.skipped || 0;
+              result.results.errors += one.results?.errors || 0;
+              if (Array.isArray(one.results?.details)) {
+                result.results.details.push(...one.results.details);
+              }
+            } catch (singleErr) {
+              result.results.errors += 1;
+              result.results.details.push(
+                `ERROR: ${single.name || "Unknown"} — ${singleErr.message}`,
+              );
+            }
+            await delay(500);
+          }
+        } else {
+          throw err;
+        }
       }
-
-      const result = await response.json();
       console.log(
         `  ✅ Batch ${i + 1}: ${result.results?.imported ?? 0} imported, ${result.results?.skipped ?? 0} skipped, ${result.results?.errors ?? 0} errors`,
       );

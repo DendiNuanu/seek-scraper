@@ -466,27 +466,119 @@ export function extractCandidateDetailFromModal() {
 
   const profileUrl = /selected=/.test(location.href) ? location.href : null;
 
+  const isEducationLine = (line) =>
+    /sarjana|diploma|magister|bachelor|s1\b|s2\b|s3\b|arsitektur|akuntansi|degree/i.test(
+      line,
+    ) || /,\s*\d{4}\s*$/.test(line);
+
+  const isJobOrNoiseLine = (line) =>
+    !line ||
+    line.length > 70 ||
+    /@/.test(line) ||
+    /^\+\d/.test(line) ||
+    /^applied\b/i.test(line) ||
+    /\s+at\s+/i.test(line) ||
+    /officer|manager|designer|staff|engineer|consultant/i.test(line) ||
+    isEducationLine(line);
+
+  /** SEEK shows domicile as a short region/city line under contact (e.g. Jakarta, East Java, Bali). */
+  const isSeekDomicileLine = (line) => {
+    const t = (line || "").trim();
+    if (!t || t.length < 2 || t.length > 55) return false;
+    if (isJobOrNoiseLine(t)) return false;
+    if (t === name) return false;
+
+    if (/^(East|West|Central|North|South)\s+Java$/i.test(t)) return true;
+    if (
+      /^(Bali|Jakarta|Surabaya|Bandung|Yogyakarta|Semarang|Medan|Denpasar|Malang|Solo|Bogor|Bekasi|Depok|Tangerang|Batam|Makassar|Palembang|Balikpapan|Cirebon|Padang|Pontianak|Manado|Ambon|Jayapura|Kupang|Mataram|Kendari|Palu|Tarakan|Samarinda|Banjarbaru|Pekanbaru|Jambi|Bengkulu|Lampung|Serang|Cilegon|Sukabumi|Garut|Tasikmalaya|Cimahi)$/i.test(
+        t,
+      )
+    ) {
+      return true;
+    }
+    if (/^(DKI|DI)\s/i.test(t)) return true;
+    if (/^(Kabupaten|Kota)\s/i.test(t)) return true;
+    if (
+      /java|jakarta|bali|yogyakarta|sumatra|sumatera|kalimantan|sulawesi|papua|banten|aceh|riau|lombok|maluku|nusa\s+tenggara|ntb|ntt|indonesia|jawa\s+timur|jawa\s+tengah|jawa\s+barat/i.test(
+        t,
+      ) &&
+      !/\d{5,}/.test(t)
+    ) {
+      return true;
+    }
+    return false;
+  };
+
+  const normalizeDomicile = (raw) => {
+    const t = (raw || "").trim();
+    if (!t || !isSeekDomicileLine(t)) return null;
+    return t.replace(/\s+/g, " ");
+  };
+
   let domicileLocation = null;
+
   const locAutomation = root.querySelector(
-    '[data-automation*="location"], [data-automation*="address"]',
+    '[data-automation*="location"], [data-automation*="address"], [data-automation*="domicile"]',
   );
   if (locAutomation) {
-    const t = locAutomation.textContent?.trim();
-    if (t && t.length > 3 && t.length < 80) domicileLocation = t;
+    domicileLocation = normalizeDomicile(locAutomation.textContent);
   }
+
+  // Pin icon row (location sits beside the map-pin SVG in the profile header)
   if (!domicileLocation) {
-    const locEl = [...root.querySelectorAll("span, p, div")].find((el) => {
+    for (const svg of root.querySelectorAll("svg")) {
+      const row =
+        svg.closest("div, span, p, li, [data-automation]")?.parentElement ||
+        svg.parentElement;
+      if (!row) continue;
+      const lines = (row.innerText || "")
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      for (const line of lines) {
+        const loc = normalizeDomicile(line);
+        if (loc) {
+          domicileLocation = loc;
+          break;
+        }
+      }
+      if (domicileLocation) break;
+    }
+  }
+
+  // Header lines immediately after phone / email (SEEK order: role → email | phone → location → education)
+  if (!domicileLocation) {
+    const headerRoot =
+      h1?.closest("header, section, div") ||
+      root.querySelector('[data-automation*="candidate-header"]') ||
+      root;
+    const lines = (headerRoot.innerText || root.innerText || "")
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const contactIdx = lines.findIndex(
+      (l) => l.includes("@") || /^\+\d[\d\s-]{8,}/.test(l),
+    );
+    const searchFrom = contactIdx >= 0 ? contactIdx + 1 : 0;
+    const searchTo = Math.min(searchFrom + 6, lines.length);
+
+    for (let i = searchFrom; i < searchTo; i++) {
+      const loc = normalizeDomicile(lines[i]);
+      if (loc) {
+        domicileLocation = loc;
+        break;
+      }
+    }
+  }
+
+  if (!domicileLocation) {
+    const locEl = [...root.querySelectorAll("span, p, div, li")].find((el) => {
+      if (el.children.length > 2) return false;
       const t = (el.textContent || "").trim();
-      return (
-        t.length > 5 &&
-        t.length < 80 &&
-        el.children.length === 0 &&
-        /(Kabupaten|Kota|Jakarta|Surabaya|Bandung|Bali|Yogyakarta|Semarang|Medan|Denpasar|Indonesia)/i.test(
-          t,
-        )
-      );
+      return isSeekDomicileLine(t);
     });
-    if (locEl) domicileLocation = locEl.textContent?.trim() || null;
+    if (locEl) domicileLocation = normalizeDomicile(locEl.textContent);
   }
 
   return { name, email, phone, profileUrl, location: domicileLocation };
