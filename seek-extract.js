@@ -426,6 +426,8 @@ export function extractYourCandidatesFromDom() {
       profileUrl,
       jobId,
       source: "SEEK",
+      location: null,
+      domicile: null,
     });
   }
 
@@ -464,7 +466,30 @@ export function extractCandidateDetailFromModal() {
 
   const profileUrl = /selected=/.test(location.href) ? location.href : null;
 
-  return { name, email, phone, profileUrl };
+  let domicileLocation = null;
+  const locAutomation = root.querySelector(
+    '[data-automation*="location"], [data-automation*="address"]',
+  );
+  if (locAutomation) {
+    const t = locAutomation.textContent?.trim();
+    if (t && t.length > 3 && t.length < 80) domicileLocation = t;
+  }
+  if (!domicileLocation) {
+    const locEl = [...root.querySelectorAll("span, p, div")].find((el) => {
+      const t = (el.textContent || "").trim();
+      return (
+        t.length > 5 &&
+        t.length < 80 &&
+        el.children.length === 0 &&
+        /(Kabupaten|Kota|Jakarta|Surabaya|Bandung|Bali|Yogyakarta|Semarang|Medan|Denpasar|Indonesia)/i.test(
+          t,
+        )
+      );
+    });
+    if (locEl) domicileLocation = locEl.textContent?.trim() || null;
+  }
+
+  return { name, email, phone, profileUrl, location: domicileLocation };
 }
 
 /**

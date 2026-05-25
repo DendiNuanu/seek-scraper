@@ -409,6 +409,10 @@ async function captureProfileDetails(page, candidate) {
   if (detail.email) candidate.email = detail.email;
   if (detail.phone) candidate.phone = detail.phone;
   if (detail.profileUrl) candidate.profileUrl = detail.profileUrl;
+  if (detail.location) {
+    candidate.location = detail.location;
+    candidate.domicile = detail.location;
+  }
 
   const resumePath = await downloadResumeFromModal(page, candidate.name);
   if (resumePath) {
@@ -807,6 +811,8 @@ function buildApiCandidatePayload(c) {
     appliedAt: parseRelativeAppliedAtToIso(c.appliedAt),
     profileUrl: c.profileUrl,
     source: c.source,
+    location: c.location || null,
+    domicile: c.domicile || c.location || null,
   };
 
   if (c.resumeLocalPath && fs.existsSync(c.resumeLocalPath)) {
