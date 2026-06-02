@@ -39,6 +39,7 @@ const SCRAPER_CONFIG = {
   startPage: Math.max(1, parseInt(process.env.START_PAGE || "1", 10)),
   maxPages: Math.min(500, Math.max(1, parseInt(process.env.MAX_PAGES || "1", 10))),
   maxAgeMonths: Math.max(0, parseInt(process.env.MAX_AGE_MONTHS || "0", 10)),
+  appliedAfter: process.env.APPLIED_AFTER ? new Date(process.env.APPLIED_AFTER) : null,
   maxJobs: parseInt(process.env.MAX_JOBS || "20", 10),
   delayMs: TURBO_MODE
     ? parseInt(process.env.DELAY_MS || "1200", 10)
@@ -62,6 +63,9 @@ const SCRAPER_CONFIG = {
   turboEnrich: process.env.TURBO_ENRICH === "true",
   turboEnrichCheckpoint:
     process.env.TURBO_ENRICH_CHECKPOINT || CHECKPOINT_PATH,
+  /** Import candidates to ATS during phase 2, in smaller batches */
+  importOnTheFly: process.env.IMPORT_ON_THE_FLY !== "false",
+  importBatchSize: Math.max(1, parseInt(process.env.IMPORT_BATCH_SIZE || "20", 10)),
   /** Scrape N list pages at once (same login; do not use with fetchContactDetails on list) */
   parallelListPages: Math.min(
     5,
@@ -73,6 +77,12 @@ const SCRAPER_CONFIG = {
     Math.max(1, parseInt(process.env.ENRICH_CONCURRENCY || "2", 10)),
   ),
 };
+
+let shuttingDown = false;
+let pendingImportCandidates = [];
+let importFlushInProgress = false;
+let currentCheckpointCandidates = [];
+let currentCheckpointLastPage = 0;
 
 if (!SCRAPER_CONFIG.scrapeOnly && (!SCRAPER_CONFIG.nuanuApiUrl || !SCRAPER_CONFIG.nuanuApiKey)) {
   console.error("❌ Missing NUANU_API_URL or NUANU_API_KEY in .env (or set SCRAPE_ONLY=true)");
@@ -209,25 +219,33 @@ async function scrapeOneListPage(page, context, pageNum, network) {
     return { empty: true, reachedAgeCutoff: false, withinWindow: [], pageCandidates };
   }
 
-  const withinWindow =
-    SCRAPER_CONFIG.maxAgeMonths > 0
-      ? pageCandidates.filter((c) =>
-          isWithinMaxAgeMonths(c.appliedAt, SCRAPER_CONFIG.maxAgeMonths),
-        )
-      : pageCandidates;
+  const withinWindow = pageCandidates.filter((c) => {
+    const passesAge =
+      SCRAPER_CONFIG.maxAgeMonths > 0
+        ? isWithinMaxAgeMonths(c.appliedAt, SCRAPER_CONFIG.maxAgeMonths)
+        : true;
+    const passesDate =
+      SCRAPER_CONFIG.appliedAfter instanceof Date && !Number.isNaN(SCRAPER_CONFIG.appliedAfter.getTime())
+        ? isAppliedAfter(c.appliedAt, SCRAPER_CONFIG.appliedAfter)
+        : true;
+    return passesAge && passesDate;
+  });
 
   const skippedByAge = pageCandidates.length - withinWindow.length;
   if (skippedByAge > 0) {
-    console.log(
-      `  ⏳ Skipped ${skippedByAge} on this page (older than ${SCRAPER_CONFIG.maxAgeMonths} months)`,
-    );
+    const reason = SCRAPER_CONFIG.appliedAfter
+      ? `older than ${SCRAPER_CONFIG.appliedAfter.toISOString().slice(0, 10)}`
+      : `older than ${SCRAPER_CONFIG.maxAgeMonths} months`;
+    console.log(`  ⏳ Skipped ${skippedByAge} on this page (${reason})`);
   }
 
   const oldestOnPage = pageCandidates[pageCandidates.length - 1];
   const reachedAgeCutoff =
-    SCRAPER_CONFIG.maxAgeMonths > 0 &&
-    oldestOnPage &&
-    !isWithinMaxAgeMonths(oldestOnPage.appliedAt, SCRAPER_CONFIG.maxAgeMonths);
+    SCRAPER_CONFIG.appliedAfter instanceof Date && !Number.isNaN(SCRAPER_CONFIG.appliedAfter.getTime())
+      ? oldestOnPage && !isAppliedAfter(oldestOnPage.appliedAt, SCRAPER_CONFIG.appliedAfter)
+      : SCRAPER_CONFIG.maxAgeMonths > 0 &&
+        oldestOnPage &&
+        !isWithinMaxAgeMonths(oldestOnPage.appliedAt, SCRAPER_CONFIG.maxAgeMonths);
 
   if (SCRAPER_CONFIG.fetchContactDetails && withinWindow.length > 0) {
     fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
@@ -366,6 +384,12 @@ async function enrichCheckpointCandidates(context, candidates, network) {
       try {
         await enrichFromProfileUrl(page, candidate, candidate.profileUrl, null, network);
         done++;
+        if (SCRAPER_CONFIG.importOnTheFly && !SCRAPER_CONFIG.scrapeOnly) {
+          pendingImportCandidates.push(candidate);
+          if (pendingImportCandidates.length >= SCRAPER_CONFIG.importBatchSize) {
+            await flushPendingImports();
+          }
+        }
         if (done % 10 === 0) {
           saveScrapeCheckpoint(candidates, loadScrapeCheckpoint()?.lastPage || 0);
         }
@@ -382,6 +406,10 @@ async function enrichCheckpointCandidates(context, candidates, network) {
   await Promise.all(
     Array.from({ length: workers }, (_, workerId) => worker(workerId + 1)),
   );
+
+  if (SCRAPER_CONFIG.importOnTheFly && !SCRAPER_CONFIG.scrapeOnly) {
+    await flushPendingImports();
+  }
 
   saveScrapeCheckpoint(candidates, loadScrapeCheckpoint()?.lastPage || 0);
   return done;
@@ -765,6 +793,12 @@ async function enrichCandidatesViaJobPipelines(page, context, candidates, networ
       try {
         if (await enrichFromProfileUrl(page, candidate, profileUrl, null, network))
           enriched++;
+        if (SCRAPER_CONFIG.importOnTheFly && !SCRAPER_CONFIG.scrapeOnly) {
+          pendingImportCandidates.push(candidate);
+          if (pendingImportCandidates.length >= SCRAPER_CONFIG.importBatchSize) {
+            await flushPendingImports();
+          }
+        }
       } catch (err) {
         console.log(`      ⚠️  ${err.message}`);
       }
@@ -978,6 +1012,12 @@ function parseRelativeAppliedAtToIso(relative) {
   return parseRelativeAppliedAtToDate(relative).toISOString();
 }
 
+function isAppliedAfter(appliedAtLabel, afterDate) {
+  if (!(afterDate instanceof Date) || Number.isNaN(afterDate.getTime())) return true;
+  const applied = parseRelativeAppliedAtToDate(appliedAtLabel);
+  return applied >= afterDate;
+}
+
 function isWithinMaxAgeMonths(appliedAtLabel, maxAgeMonths) {
   if (!maxAgeMonths || maxAgeMonths <= 0) return true;
   const applied = parseRelativeAppliedAtToDate(appliedAtLabel);
@@ -1037,6 +1077,127 @@ function saveScrapeCheckpoint(candidates, lastPage) {
       2,
     ),
   );
+}
+
+function unsentCandidates(candidates) {
+  return dedupeCandidates(candidates.filter((c) => !c.imported));
+}
+
+async function flushPendingImports() {
+  if (!pendingImportCandidates.length) return;
+  if (importFlushInProgress) return;
+  importFlushInProgress = true;
+
+  const totalToSend = pendingImportCandidates.length;
+  let totalSent = 0;
+  let retryCount = 0;
+  const maxRetries = 2;
+  const batchTimeoutMs = 60000; // 60 seconds per batch
+
+  try {
+    while (pendingImportCandidates.length > 0 && retryCount < maxRetries) {
+      const batch = pendingImportCandidates.slice();
+      console.log(`  📤 Flush batch: ${batch.length}/${totalToSend} candidates (attempt ${retryCount + 1})`);
+
+      try {
+        const sendPromise = sendToNuanuATS(batch);
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`Batch timeout after ${batchTimeoutMs / 1000}s`)),
+            batchTimeoutMs
+          )
+        );
+
+        const result = await Promise.race([sendPromise, timeoutPromise]);
+
+        if (result && result.errorCount === 0) {
+          for (const c of batch) {
+            c.imported = true;
+          }
+          totalSent += batch.length;
+          if (currentCheckpointCandidates.length > 0) {
+            saveScrapeCheckpoint(currentCheckpointCandidates, currentCheckpointLastPage);
+          }
+          pendingImportCandidates.splice(0, batch.length);
+          retryCount = 0;
+          console.log(`  ✅ Batch sent (total sent: ${totalSent}/${totalToSend})`);
+        } else {
+          console.error(`  ⚠️  Batch had errors — retrying... (${result?.errorCount} errors)`);
+          retryCount++;
+          await delay(1000);
+        }
+      } catch (err) {
+        console.error(`  ❌ Batch failed: ${err?.message || err}`);
+        retryCount++;
+        await delay(1000);
+      }
+    }
+
+    if (pendingImportCandidates.length === 0) {
+      console.log(`  ✅ All ${totalSent} pending candidates flushed to ATS`);
+    } else {
+      console.error(`  ⚠️  Could not send ${pendingImportCandidates.length} candidates after ${maxRetries} retries`);
+    }
+  } finally {
+    importFlushInProgress = false;
+  }
+}
+
+function setupSigintHandler() {
+  process.on("SIGINT", async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log("\n⚠️  SIGINT received — flushing ALL pending ATS imports...");
+    console.log(`  Pending candidates: ${pendingImportCandidates.length}`);
+
+    const startTime = Date.now();
+    const flushTimeoutMs = 3 * 60 * 1000; // 3 minutes max
+    const heartbeatIntervalMs = 5000; // Show progress every 5 seconds
+
+    let heartbeatTimer = setInterval(() => {
+      const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(0);
+      const remaining = pendingImportCandidates.length;
+      if (remaining > 0) {
+        console.log(`  ⏳ Still flushing... (${elapsedSec}s elapsed, ${remaining} candidates pending)`);
+      }
+    }, heartbeatIntervalMs);
+
+    try {
+      const flushPromise = (async () => {
+        await flushPendingImports();
+        await delay(500);
+      })();
+
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`Force exit: flush exceeded ${flushTimeoutMs / 1000 / 60} minutes`)),
+          flushTimeoutMs
+        )
+      );
+
+      await Promise.race([flushPromise, timeoutPromise]);
+
+      const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
+      if (pendingImportCandidates.length === 0) {
+        console.log(`  ✅ SUCCESS: All pending imports sent to ATS (${elapsedSec}s)`);
+      } else {
+        console.error(`  ⚠️  ${pendingImportCandidates.length} candidates still pending after flush`);
+      }
+    } catch (err) {
+      const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.error(`  ❌ Flush error: ${err?.message || err} (after ${elapsedSec}s)`);
+      console.error(`  Remaining pending: ${pendingImportCandidates.length} candidates`);
+      if (pendingImportCandidates.length > 0) {
+        console.error(`  💾 Checkpoint saved — will retry on next 'npm run turbo-enrich'`);
+      }
+    } finally {
+      clearInterval(heartbeatTimer);
+    }
+
+    await delay(1000);
+    console.log("  👋 Exiting...");
+    process.exit(pendingImportCandidates.length === 0 ? 0 : 1);
+  });
 }
 
 function guessResumeMimeType(fileName) {
@@ -1190,20 +1351,21 @@ async function postCandidateBatchWith413Fallback(batch) {
 }
 
 async function sendToNuanuATS(candidates) {
-  if (candidates.length === 0) {
-    console.log("⚠️  No candidates to send");
-    return;
+  const unsent = dedupeCandidates(candidates.filter((c) => !c.imported));
+  if (unsent.length === 0) {
+    console.log("⚠️  No unsent candidates to send");
+    return { importedCount: 0, skippedCount: 0, errorCount: 0 };
   }
 
-  const withResume = candidates.filter(
+  const withResume = unsent.filter(
     (c) => c.resumeLocalPath && fs.existsSync(c.resumeLocalPath),
   ).length;
-  console.log(`\n📤 Sending ${candidates.length} candidates to Nuanu ATS...`);
+  console.log(`\n📤 Sending ${unsent.length} candidates to Nuanu ATS...`);
   if (withResume > 0) {
     console.log(`  📎 Including ${withResume} resume file(s) for Supabase upload`);
   }
 
-  const apiCandidates = candidates.map(buildApiCandidatePayload);
+  const apiCandidates = unsent.map(buildApiCandidatePayload);
   const batches = buildImportBatches(apiCandidates);
 
   let totalImported = 0;
@@ -1247,6 +1409,14 @@ async function sendToNuanuATS(candidates) {
   console.log(`  ❌ Errors:    ${totalErrors}`);
   console.log("\n🎉 Done! Check your dashboard:");
   console.log("   https://nuanu-hr-recruitment-ats.vercel.app/dashboard/candidates");
+
+  if (totalErrors === 0) {
+    for (const c of unsent) {
+      c.imported = true;
+    }
+  }
+
+  return { importedCount: totalImported, skippedCount: totalSkipped, errorCount: totalErrors };
 }
 
 function logCandidateNames(candidates) {
@@ -1272,31 +1442,45 @@ async function main() {
       process.exit(1);
     }
     const allCands = cp.candidates;
-    const need = allCands.filter(needsProfileEnrich);
+    let candidatesToEnrich = allCands;
+    if (SCRAPER_CONFIG.appliedAfter instanceof Date && !Number.isNaN(SCRAPER_CONFIG.appliedAfter.getTime())) {
+      candidatesToEnrich = allCands.filter((c) => isAppliedAfter(c.appliedAt, SCRAPER_CONFIG.appliedAfter));
+      console.log(
+        `  Applying appliedAfter filter: ${SCRAPER_CONFIG.appliedAfter.toISOString().slice(0, 10)}  ->  ${candidatesToEnrich.length}/${allCands.length} candidates kept`,
+      );
+    }
+    currentCheckpointCandidates = candidatesToEnrich;
+    currentCheckpointLastPage = cp.lastPage || 0;
+    const need = candidatesToEnrich.filter(needsProfileEnrich);
     console.log(
-      `  Total: ${allCands.length} | need enrich: ${need.length} (missing email, location, or resume)`,
+      `  Total: ${candidatesToEnrich.length} | need enrich: ${need.length} (missing email, location, or resume)`,
     );
+
+    if (SCRAPER_CONFIG.importOnTheFly && !SCRAPER_CONFIG.scrapeOnly) {
+      setupSigintHandler();
+    }
 
     const context = await launchSeekBrowser({ headless: SCRAPER_CONFIG.headless });
     const network = createNetworkCollector();
     try {
       await ensureSeekSession(context);
-      const enriched = await enrichCheckpointCandidates(context, allCands, network);
+      const enriched = await enrichCheckpointCandidates(context, candidatesToEnrich, network);
       console.log(`  ✅ Enriched ${enriched} profiles`);
 
-      const stillNeed = allCands.filter((c) => !c.email);
+      const stillNeed = candidatesToEnrich.filter((c) => !c.email);
       if (stillNeed.length > 0) {
         const page = await context.newPage();
         await attachNetworkSniffer(page, network);
         console.log(`\n--- Job pipeline fallback (${stillNeed.length} without email) ---`);
-        await enrichCandidatesViaJobPipelines(page, context, allCands, network);
+        await enrichCandidatesViaJobPipelines(page, context, candidatesToEnrich, network);
         await page.close().catch(() => {});
       }
 
-      saveScrapeCheckpoint(allCands, cp.lastPage || 0);
-      const deduped = dedupeCandidates(allCands);
+      saveScrapeCheckpoint(candidatesToEnrich, cp.lastPage || 0);
+      const deduped = dedupeCandidates(candidatesToEnrich);
       if (!SCRAPER_CONFIG.scrapeOnly) {
         await sendToNuanuATS(deduped);
+        saveScrapeCheckpoint(candidatesToEnrich, cp.lastPage || 0);
       } else {
         console.log(`\n✅ Done. ${deduped.length} candidates in checkpoint (SCRAPE_ONLY).`);
       }
@@ -1317,6 +1501,9 @@ async function main() {
     console.log(`  Nuanu URL:   ${SCRAPER_CONFIG.nuanuApiUrl}`);
   } else {
     console.log("  Mode:        SCRAPE_ONLY (no API POST)");
+  }
+  if (SCRAPER_CONFIG.appliedAfter) {
+    console.log(`  Applied after: ${SCRAPER_CONFIG.appliedAfter.toISOString().slice(0, 10)}`);
   }
   console.log(`  Headless:    ${SCRAPER_CONFIG.headless}`);
   console.log(`  Delays:      list=${SCRAPER_CONFIG.listSettleMs}ms profile=${SCRAPER_CONFIG.profileSettleMs}ms between=${SCRAPER_CONFIG.delayMs}ms`);
