@@ -19,14 +19,15 @@ import {
   extractCandidateDetailFromModal,
   extractJobIdsFromPageHtml,
   extractYourCandidatesFromDom,
-  mergeApiFieldsIntoCandidate,
+  formatSalaryDisplay,
+    mergeApiFieldsIntoCandidate,
 } from "./seek-extract.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DOWNLOADS_DIR = path.join(__dirname, "downloads");
 
 const CHECKPOINT_PATH =
-  process.env.SCRAPE_CHECKPOINT || path.join(__dirname, "scrape-checkpoint.json");
+process.env.SCRAPE_CHECKPOINT || path.join(__dirname, "scrape-checkpoint.json");
 
 /** Phase 1: fast list only. Phase 2: TURBO_ENRICH=true for email+location+resume */
 const TURBO_MODE = process.env.TURBO_MODE === "true";
@@ -42,18 +43,18 @@ const SCRAPER_CONFIG = {
   appliedAfter: process.env.APPLIED_AFTER ? new Date(process.env.APPLIED_AFTER) : null,
   maxJobs: parseInt(process.env.MAX_JOBS || "20", 10),
   delayMs: TURBO_MODE
-    ? parseInt(process.env.DELAY_MS || "1200", 10)
-    : parseInt(process.env.DELAY_MS || "3500", 10),
+  ? parseInt(process.env.DELAY_MS || "1200", 10)
+  : parseInt(process.env.DELAY_MS || "3500", 10),
   listSettleMs: TURBO_MODE
-    ? parseInt(process.env.LIST_SETTLE_MS || "2000", 10)
-    : parseInt(process.env.LIST_SETTLE_MS || "4500", 10),
+  ? parseInt(process.env.LIST_SETTLE_MS || "2000", 10)
+  : parseInt(process.env.LIST_SETTLE_MS || "4500", 10),
   profileSettleMs: TURBO_MODE
-    ? parseInt(process.env.PROFILE_SETTLE_MS || "700", 10)
-    : parseInt(process.env.PROFILE_SETTLE_MS || "1200", 10),
+  ? parseInt(process.env.PROFILE_SETTLE_MS || "700", 10)
+  : parseInt(process.env.PROFILE_SETTLE_MS || "1200", 10),
   scrapeOnly: process.env.SCRAPE_ONLY === "true",
   fetchContactDetails: TURBO_MODE
-    ? process.env.FETCH_CONTACT_DETAILS === "true"
-    : process.env.FETCH_CONTACT_DETAILS !== "false",
+  ? process.env.FETCH_CONTACT_DETAILS === "true"
+  : process.env.FETCH_CONTACT_DETAILS !== "false",
   maxDetailCandidates: parseInt(process.env.MAX_DETAIL_CANDIDATES || "0", 10),
   jobSiteManager: process.env.SEEK_JOB_SITE_MANAGER || "",
   jobAccountingOfficer: process.env.SEEK_JOB_ACCOUNTING_OFFICER || "",
@@ -62,7 +63,7 @@ const SCRAPER_CONFIG = {
   /** Phase 2: enrich checkpoint (email, phone, location, resume) then optional ATS import */
   turboEnrich: process.env.TURBO_ENRICH === "true",
   turboEnrichCheckpoint:
-    process.env.TURBO_ENRICH_CHECKPOINT || CHECKPOINT_PATH,
+  process.env.TURBO_ENRICH_CHECKPOINT || CHECKPOINT_PATH,
   /** Import candidates to ATS during phase 2, in smaller batches */
   importOnTheFly: process.env.IMPORT_ON_THE_FLY !== "false",
   importBatchSize: Math.max(1, parseInt(process.env.IMPORT_BATCH_SIZE || "20", 10)),
@@ -141,39 +142,39 @@ function mergeCandidates(target, incoming) {
 
 async function logDomDiagnostics(page, context) {
   const diag = await page
-    .evaluate(() => {
-      const automations = {};
-      document.querySelectorAll("[data-automation]").forEach((el) => {
-        const key = el.getAttribute("data-automation");
-        automations[key] = (automations[key] || 0) + 1;
-      });
-      return {
-        url: location.href,
-        tr: document.querySelectorAll("table tbody tr").length,
-        roleRows: document.querySelectorAll('[role="row"]').length,
-        articles: document.querySelectorAll("article").length,
-        candidateLinks: document.querySelectorAll(
-          'a[href*="candidates"], a[href*="selected="]',
-        ).length,
-        dataAutomationCounts: Object.entries(automations).slice(0, 25),
-        sampleText: document.body?.innerText?.slice(0, 400),
-      };
-    })
-    .catch(() => ({ error: "evaluate failed" }));
+  .evaluate(() => {
+    const automations = {};
+    document.querySelectorAll("[data-automation]").forEach((el) => {
+      const key = el.getAttribute("data-automation");
+      automations[key] = (automations[key] || 0) + 1;
+    });
+    return {
+      url: location.href,
+      tr: document.querySelectorAll("table tbody tr").length,
+            roleRows: document.querySelectorAll('[role="row"]').length,
+            articles: document.querySelectorAll("article").length,
+            candidateLinks: document.querySelectorAll(
+              'a[href*="candidates"], a[href*="selected="]',
+            ).length,
+            dataAutomationCounts: Object.entries(automations).slice(0, 25),
+            sampleText: document.body?.innerText?.slice(0, 400),
+    };
+  })
+  .catch(() => ({ error: "evaluate failed" }));
 
   console.log(`  🔍 DOM diagnostics (${context}):`, JSON.stringify(diag, null, 2));
 }
 
 async function ensurePastApplicantsTab(page) {
   const pastTab = page
-    .locator('button, [role="tab"], a')
-    .filter({ hasText: /^Past applicants$/i })
-    .first();
+  .locator('button, [role="tab"], a')
+  .filter({ hasText: /^Past applicants$/i })
+  .first();
 
   if (await pastTab.isVisible({ timeout: 5000 }).catch(() => false)) {
     const selected =
-      (await pastTab.getAttribute("aria-selected")) === "true" ||
-      (await pastTab.getAttribute("aria-current")) === "page";
+    (await pastTab.getAttribute("aria-selected")) === "true" ||
+    (await pastTab.getAttribute("aria-current")) === "page";
     if (!selected) {
       console.log('  Clicking "Past applicants" tab...');
       await pastTab.click();
@@ -221,31 +222,31 @@ async function scrapeOneListPage(page, context, pageNum, network) {
 
   const withinWindow = pageCandidates.filter((c) => {
     const passesAge =
-      SCRAPER_CONFIG.maxAgeMonths > 0
-        ? isWithinMaxAgeMonths(c.appliedAt, SCRAPER_CONFIG.maxAgeMonths)
-        : true;
+    SCRAPER_CONFIG.maxAgeMonths > 0
+    ? isWithinMaxAgeMonths(c.appliedAt, SCRAPER_CONFIG.maxAgeMonths)
+    : true;
     const passesDate =
-      SCRAPER_CONFIG.appliedAfter instanceof Date && !Number.isNaN(SCRAPER_CONFIG.appliedAfter.getTime())
-        ? isAppliedAfter(c.appliedAt, SCRAPER_CONFIG.appliedAfter)
-        : true;
+    SCRAPER_CONFIG.appliedAfter instanceof Date && !Number.isNaN(SCRAPER_CONFIG.appliedAfter.getTime())
+    ? isAppliedAfter(c.appliedAt, SCRAPER_CONFIG.appliedAfter)
+    : true;
     return passesAge && passesDate;
   });
 
   const skippedByAge = pageCandidates.length - withinWindow.length;
   if (skippedByAge > 0) {
     const reason = SCRAPER_CONFIG.appliedAfter
-      ? `older than ${SCRAPER_CONFIG.appliedAfter.toISOString().slice(0, 10)}`
-      : `older than ${SCRAPER_CONFIG.maxAgeMonths} months`;
+    ? `older than ${SCRAPER_CONFIG.appliedAfter.toISOString().slice(0, 10)}`
+    : `older than ${SCRAPER_CONFIG.maxAgeMonths} months`;
     console.log(`  ⏳ Skipped ${skippedByAge} on this page (${reason})`);
   }
 
   const oldestOnPage = pageCandidates[pageCandidates.length - 1];
   const reachedAgeCutoff =
-    SCRAPER_CONFIG.appliedAfter instanceof Date && !Number.isNaN(SCRAPER_CONFIG.appliedAfter.getTime())
-      ? oldestOnPage && !isAppliedAfter(oldestOnPage.appliedAt, SCRAPER_CONFIG.appliedAfter)
-      : SCRAPER_CONFIG.maxAgeMonths > 0 &&
-        oldestOnPage &&
-        !isWithinMaxAgeMonths(oldestOnPage.appliedAt, SCRAPER_CONFIG.maxAgeMonths);
+  SCRAPER_CONFIG.appliedAfter instanceof Date && !Number.isNaN(SCRAPER_CONFIG.appliedAfter.getTime())
+  ? oldestOnPage && !isAppliedAfter(oldestOnPage.appliedAt, SCRAPER_CONFIG.appliedAfter)
+  : SCRAPER_CONFIG.maxAgeMonths > 0 &&
+  oldestOnPage &&
+  !isWithinMaxAgeMonths(oldestOnPage.appliedAt, SCRAPER_CONFIG.maxAgeMonths);
 
   if (SCRAPER_CONFIG.fetchContactDetails && withinWindow.length > 0) {
     fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
@@ -273,9 +274,9 @@ async function scrapeCandidatesPage(page, context, network) {
   console.log("📋 Scraping https://id.employer.seek.com/your-candidates?page=N");
   console.log(
     `  Pages: ${pageNum}–${SCRAPER_CONFIG.maxPages}` +
-      (SCRAPER_CONFIG.maxAgeMonths > 0
-        ? ` (stop after ~${SCRAPER_CONFIG.maxAgeMonths} months)`
-        : ""),
+    (SCRAPER_CONFIG.maxAgeMonths > 0
+    ? ` (stop after ~${SCRAPER_CONFIG.maxAgeMonths} months)`
+    : ""),
   );
   if (SCRAPER_CONFIG.parallelListPages > 1) {
     console.log(`  ⚡ Parallel list tabs: ${SCRAPER_CONFIG.parallelListPages}`);
@@ -499,16 +500,168 @@ function phoneDigits(phone) {
   return (phone || "").replace(/\D/g, "");
 }
 
+/**
+ * SEEK renders candidate detail as a right-side slide PANEL (not a modal/dialog).
+ * The panel is identified by: a candidate h1/h2 header + mailto link, OR
+ * by the presence of the tab navigation (Profile / Resumé / Verifications).
+ * We do NOT look for #braid-modal-container or [role="dialog"] — those don't
+ * exist on the Your Candidates page.
+ */
 async function waitForCandidateDetailModal(page) {
   await page
-    .waitForFunction(
-      () =>
-        document.querySelector('a[href^="mailto:"]') ||
-        document.querySelector("#braid-modal-container h1, #braid-modal-container h2"),
-      { timeout: 25000 },
-    )
-    .catch(() => {});
+  .waitForFunction(
+    () => {
+      // 1) Mailto link = contact details have loaded
+      if (document.querySelector('a[href^="mailto:"]')) return true;
+      // 2) A heading exists in what looks like a detail panel
+      const headings = [...document.querySelectorAll("h1, h2")];
+      const panel = headings.find((h) => {
+        const txt = (h.textContent || "").trim();
+        if (!txt || txt.length < 2) return false;
+        // The panel has tab navigation nearby
+        const container =
+        h.closest("aside, section, [data-automation], div") ||
+        h.parentElement;
+        const containerText = (container?.innerText || "").toLowerCase();
+        return (
+          containerText.includes("profile") &&
+          (containerText.includes("resumé") ||
+          containerText.includes("resume") ||
+          containerText.includes("verif"))
+        );
+      });
+      if (panel) return true;
+      // 3) Application questions section is visible = profile tab already loaded
+      const allText = (document.body.innerText || "").toLowerCase();
+      return (
+        allText.includes("application questions") ||
+        allText.includes("gaji bulanan yang diinginkan") ||
+        allText.includes("expected monthly salary")
+      );
+    },
+    { timeout: 30000 },
+  )
+  .catch(() => {});
   await delay(SCRAPER_CONFIG.profileSettleMs);
+}
+
+/** Append (or replace) `tab=profile` on a SEEK candidate URL so the modal
+ *  opens directly on the Profile tab (the only tab that shows screening
+ *  answers like "Expected monthly salary"). */
+function withProfileTab(rawUrl) {
+  if (!rawUrl) return rawUrl;
+  try {
+    const u = new URL(rawUrl);
+    u.searchParams.set("tab", "profile");
+    return u.toString();
+  } catch {
+    return rawUrl.includes("tab=")
+    ? rawUrl.replace(/tab=[^&]*/i, "tab=profile")
+    : rawUrl + (rawUrl.includes("?") ? "&" : "?") + "tab=profile";
+  }
+}
+
+/**
+ * SEEK's candidate detail is a RIGHT-SIDE PANEL (not a modal/dialog).
+ * The panel contains tab links: Profile / Verifications / Resumé / etc.
+ *
+ * When we navigate with ?tab=profile the Profile tab is already "selected"
+ * but SEEK may still be loading the screening answers via XHR.
+ *
+ * Strategy:
+ *  1. If "Application questions" / salary label is already in the page → done.
+ *  2. Otherwise find and click the Profile tab link in the panel.
+ *  3. Wait for screening section to render (up to 20s).
+ */
+async function ensureProfileTabActive(page) {
+  // ── Step 1: already loaded? ──────────────────────────────────────────────
+  const alreadyLoaded = await page.evaluate(() => {
+    const txt = (document.body.innerText || "").toLowerCase();
+    return (
+      txt.includes("application questions") ||
+      txt.includes("pertanyaan penyaringan") ||
+      txt.includes("gaji bulanan yang diinginkan") ||
+      txt.includes("expected monthly salary") ||
+      txt.includes("salary expectation")
+    );
+  }).catch(() => false);
+
+  if (alreadyLoaded) {
+    console.log("      [SEEK PROFILE TAB] already loaded ✓");
+    await delay(500);
+    return true;
+  }
+
+  // ── Step 2: find the detail panel (SEEK renders as aside / section / div) ─
+  // The panel root contains both the candidate name heading AND tab links.
+  const panelRoot = page.locator([
+    // SEEK sometimes uses a dedicated aside for the candidate detail
+    "aside:has(a[href^='mailto:'])",
+                                 // Or a section with the Profile tab link
+                                 "section:has([role='tab'])",
+                                 // Generic: any div that has both an h1/h2 and a tab list
+                                 "div:has(h1):has([role='tablist'])",
+                                 "div:has(h2):has([role='tablist'])",
+                                 // Fallback: page body (works when SEEK renders full-page)
+                                 "body",
+  ].join(", ")).first();
+
+  // ── Step 3: click the Profile tab inside the panel ───────────────────────
+  const tabSelectors = [
+    '[role="tab"][aria-label="Profile"]',
+    '[role="tab"]:has-text("Profile")',
+    'a[role="tab"]:has-text("Profile")',
+    'button[role="tab"]:has-text("Profile")',
+    // SEEK Indonesia sometimes uses anchor-style tabs
+    'a:has-text("Profile")',
+    'nav a:has-text("Profile")',
+  ];
+
+  for (const sel of tabSelectors) {
+    try {
+      const tab = panelRoot.locator(sel).first();
+      if (!(await tab.isVisible({ timeout: 2000 }).catch(() => false))) continue;
+      const selected = await tab.getAttribute("aria-selected").catch(() => null);
+      const classes  = await tab.getAttribute("class").catch(() => "");
+      const isActive = selected === "true" || (classes || "").includes("active");
+      if (!isActive) {
+        console.log(`      [SEEK PROFILE TAB] clicking: "${sel}"`);
+        await tab.click({ timeout: 5000 }).catch(() => {});
+        await delay(1500);
+      } else {
+        console.log(`      [SEEK PROFILE TAB] already active: "${sel}"`);
+      }
+      break;
+    } catch {
+      // try next selector
+    }
+  }
+
+  // ── Step 4: wait for screening / application questions to appear ─────────
+  await page
+  .waitForFunction(
+    () => {
+      const txt = (document.body.innerText || "").toLowerCase();
+      return (
+        txt.includes("application questions") ||
+        txt.includes("pertanyaan penyaringan") ||
+        txt.includes("gaji bulanan yang diinginkan") ||
+        txt.includes("expected monthly salary") ||
+        txt.includes("salary expectation") ||
+        // Acceptable: no salary question on this profile, but work/education loaded
+        (txt.includes("career history") || txt.includes("riwayat pekerjaan") ||
+        txt.includes("education") || txt.includes("pendidikan"))
+      );
+    },
+    { timeout: 20000 },
+  )
+  .catch(() => {
+    console.log("      [SEEK PROFILE TAB] waitForFunction timed out");
+  });
+
+  await delay(1500);
+  console.log("      [SEEK PROFILE TAB LOADED]");
+  return true;
 }
 
 async function waitForCandidatesListReady(page) {
@@ -516,27 +669,27 @@ async function waitForCandidatesListReady(page) {
   await delay(400);
 
   await page
-    .waitForFunction(
-      () => {
-        const links = document.querySelectorAll('a[href^="tel:"]');
-        if (links.length === 0) return false;
-        const first = links[0];
-        const row = first.closest("tr") || first.closest('[role="row"]') || first.parentElement;
-        const text = (row?.innerText || "").trim();
-        return text.length > 20 && /\+?\d/.test(text);
-      },
-      { timeout: 40000 },
-    )
-    .catch(() => console.log("  Waiting for candidate rows timed out"));
+  .waitForFunction(
+    () => {
+      const links = document.querySelectorAll('a[href^="tel:"]');
+      if (links.length === 0) return false;
+      const first = links[0];
+      const row = first.closest("tr") || first.closest('[role="row"]') || first.parentElement;
+      const text = (row?.innerText || "").trim();
+      return text.length > 20 && /\+?\d/.test(text);
+    },
+    { timeout: 40000 },
+  )
+  .catch(() => console.log("  Waiting for candidate rows timed out"));
 
   // Let SEEK finish rendering the first (newest) rows
   let lastCount = 0;
   let stablePasses = 0;
   for (let i = 0; i < 12; i++) {
     const count = await page
-      .locator('a[href^="tel:"]')
-      .count()
-      .catch(() => 0);
+    .locator('a[href^="tel:"]')
+    .count()
+    .catch(() => 0);
     if (count === lastCount && count > 0) stablePasses++;
     else stablePasses = 0;
     lastCount = count;
@@ -548,18 +701,27 @@ async function waitForCandidatesListReady(page) {
 }
 
 async function downloadResumeFromModal(page, candidateName) {
-  const modal = page.locator("#braid-modal-container, [role='dialog']").first();
-  const resumeTab = modal.getByRole("tab", { name: /^R[eé]sum[eé]$/i }).first();
+  // SEEK renders a right-side PANEL (not a modal).
+  // We scope to the full page since the panel has no single stable root selector.
+  const panelScope = page;
+  const resumeTab = panelScope.locator([
+    '[role="tab"]:has-text("Resumé")',
+                                       '[role="tab"]:has-text("Resume")',
+                                       'a[role="tab"]:has-text("Resumé")',
+                                       'a[role="tab"]:has-text("Resume")',
+                                       'nav a:has-text("Resumé")',
+                                       'nav a:has-text("Resume")',
+  ].join(", ")).first();
   if (await resumeTab.isVisible({ timeout: 3000 }).catch(() => false)) {
     await resumeTab.click().catch(() => {});
     await delay(1200);
   }
 
-  const downloadBtn = modal
-    .locator(
-      '[aria-label="Download document"], [title="Download document"], button:has-text("Download")',
-    )
-    .first();
+  const downloadBtn = panelScope
+  .locator(
+    '[aria-label="Download document"], [title="Download document"], button:has-text("Download")',
+  )
+  .first();
 
   if (!(await downloadBtn.isVisible({ timeout: 8000 }).catch(() => false))) {
     return null;
@@ -570,7 +732,7 @@ async function downloadResumeFromModal(page, candidateName) {
   try {
     const [download] = await Promise.all([
       page.waitForEvent("download", { timeout: 45000 }),
-      downloadBtn.click(),
+                                         downloadBtn.click(),
     ]);
     const safeName = (candidateName || "candidate").replace(/[^\w.-]+/g, "_").slice(0, 60);
     const dest = path.join(DOWNLOADS_DIR, `${safeName}_${download.suggestedFilename()}`);
@@ -584,11 +746,16 @@ async function downloadResumeFromModal(page, candidateName) {
 
 async function closeCandidateDetail(page, returnUrl) {
   await page.keyboard.press("Escape").catch(() => {});
-  const closeBtn = page.locator(
-    '#braid-modal-container button[aria-label="Close"], #braid-modal-container button:has-text("Close")',
-  );
-  if (await closeBtn.first().isVisible({ timeout: 1000 }).catch(() => false)) {
-    await closeBtn.first().click().catch(() => {});
+  // SEEK panel close button — try multiple selectors since there's no stable modal root
+  const closeBtn = page.locator([
+    '#braid-modal-container button[aria-label="Close"]',
+    '#braid-modal-container button:has-text("Close")',
+                                'button[aria-label="Close"]',
+                                'aside button[aria-label="Close"]',
+                                'button:has-text("Close")',
+  ].join(", ")).first();
+  if (await closeBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
+    await closeBtn.click().catch(() => {});
   }
   await dismissSeekOverlays(page);
   if (returnUrl && !page.url().includes("your-candidates")) {
@@ -601,6 +768,10 @@ async function closeCandidateDetail(page, returnUrl) {
 async function captureProfileDetails(page, candidate, network) {
   if (network) drainNetworkCandidatesInto(network, candidate);
 
+  // The salary screening question only appears under the Profile tab.
+  // Activate it (and wait for its content) before extracting anything.
+  await ensureProfileTabActive(page);
+
   const detail = await fetchContactFromDetailPanel(page);
   if (detail.email) candidate.email = detail.email;
   if (detail.phone) candidate.phone = detail.phone;
@@ -609,6 +780,31 @@ async function captureProfileDetails(page, candidate, network) {
     candidate.location = detail.location;
     candidate.domicile = detail.location;
     console.log(`      📍 ${detail.location}`);
+  }
+
+  // Expected monthly salary (screening question). Profile-tab is the only
+  // source of truth — we do NOT fall back to the résumé tab. When no salary
+  // label is found we explicitly persist `null` so the ATS won't re-poll.
+  const rawSalary = detail.expectedSalaryRaw ?? null;
+  const normalizedSalary = formatSalaryDisplay({
+    raw: rawSalary,
+    amount: detail.expectedSalary,
+    currency: detail.expectedSalaryCurrency,
+  });
+
+  console.log(`      [SALARY RAW] ${rawSalary === null ? "null" : JSON.stringify(rawSalary)}`);
+  console.log(
+    `      [SALARY NORMALIZED] ${normalizedSalary === null ? "null" : JSON.stringify(normalizedSalary)}`,
+  );
+
+  candidate.expectedSalaryRaw = rawSalary;
+  candidate.expectedSalary = detail.expectedSalary ?? null;
+  candidate.expectedSalaryCurrency = detail.expectedSalaryCurrency ?? null;
+  candidate.salaryExpectation = normalizedSalary;
+  candidate.salarySource = normalizedSalary ? "profile-tab" : null;
+
+  if (normalizedSalary) {
+    console.log(`      💰 ${normalizedSalary}`);
   }
 
   if (network) drainNetworkCandidatesInto(network, candidate);
@@ -624,7 +820,11 @@ async function captureProfileDetails(page, candidate, network) {
 
 async function enrichFromProfileUrl(page, candidate, profileUrl, returnUrl, network) {
   await dismissSeekOverlays(page);
-  await safeGoto(page, profileUrl);
+  // Force ?tab=profile so SEEK opens the modal directly on the Profile tab
+  // (the only tab where "Expected monthly salary" / "Gaji bulanan yang
+  // diinginkan" is rendered).
+  const profileTabUrl = withProfileTab(profileUrl);
+  await safeGoto(page, profileTabUrl);
   await waitForCandidateDetailModal(page);
 
   const ok = await captureProfileDetails(page, candidate, network);
@@ -652,8 +852,8 @@ async function openCandidateProfile(page, candidate, returnUrl, network) {
 
     const digits = phoneDigits(candidate.phone);
     const clickResult = await page
-      .evaluate(clickYourCandidatesRowByPhone, digits)
-      .catch(() => ({ ok: false, reason: "evaluate failed" }));
+    .evaluate(clickYourCandidatesRowByPhone, digits)
+    .catch(() => ({ ok: false, reason: "evaluate failed" }));
 
     if (!clickResult?.ok) return false;
 
@@ -694,16 +894,16 @@ async function collectProfileLinksForJob(page, context, jobId, network) {
   const addLinks = async (label) => {
     const links = await page.evaluate(() => {
       return [...document.querySelectorAll('a[href*="selected="]')]
-        .map((a) => {
-          const card =
-            a.closest("li, article, [role='row'], [data-automation], div") || a.parentElement;
-          const name =
-            card?.querySelector("h1, h2, h3, h4, strong")?.textContent?.trim() ||
-            a.textContent?.trim() ||
-            "";
-          return { href: a.href, name };
-        })
-        .filter((x) => x.href && x.name && x.name.length > 2);
+      .map((a) => {
+        const card =
+        a.closest("li, article, [role='row'], [data-automation], div") || a.parentElement;
+        const name =
+        card?.querySelector("h1, h2, h3, h4, strong")?.textContent?.trim() ||
+        a.textContent?.trim() ||
+        "";
+    return { href: a.href, name };
+      })
+      .filter((x) => x.href && x.name && x.name.length > 2);
     });
 
     let added = 0;
@@ -722,11 +922,11 @@ async function collectProfileLinksForJob(page, context, jobId, network) {
   await ensureStillLoggedIn(context, page);
 
   await page
-    .waitForFunction(
-      () => document.querySelectorAll('a[href*="selected="]').length > 0,
-      { timeout: 35000 },
-    )
-    .catch(() => {});
+  .waitForFunction(
+    () => document.querySelectorAll('a[href*="selected="]').length > 0,
+                   { timeout: 35000 },
+  )
+  .catch(() => {});
 
   await addLinks("Inbox (default)");
 
@@ -852,25 +1052,25 @@ async function scrapeJobCandidates(page, context, jobId, jobTitle, network) {
   await ensureStillLoggedIn(context, page);
 
   await page
-    .waitForFunction(
-      () =>
-        document.body?.innerText?.includes("Applications") ||
-        document.body?.innerText?.includes("Applied") ||
-        document.querySelectorAll('a[href*="selected="]').length > 0,
-      { timeout: 35000 },
-    )
-    .catch(() => {
-      console.log("    Waiting for applications list timed out");
-    });
+  .waitForFunction(
+    () =>
+    document.body?.innerText?.includes("Applications") ||
+    document.body?.innerText?.includes("Applied") ||
+    document.querySelectorAll('a[href*="selected="]').length > 0,
+                   { timeout: 35000 },
+  )
+  .catch(() => {
+    console.log("    Waiting for applications list timed out");
+  });
 
   const title =
-    jobTitle ||
-    (await page
-      .locator("h1, h2")
-      .first()
-      .textContent()
-      .catch(() => null))?.trim() ||
-    "Unknown Role";
+  jobTitle ||
+  (await page
+  .locator("h1, h2")
+  .first()
+  .textContent()
+  .catch(() => null))?.trim() ||
+  "Unknown Role";
 
   const collected = [];
   const seen = new Set();
@@ -1040,13 +1240,20 @@ function hasResumeOnDisk(c) {
   return Boolean(c.resumeLocalPath && fs.existsSync(c.resumeLocalPath));
 }
 
-/** ATS needs: email, phone (list), domicile, resume file */
+/** ATS needs: email, phone (list), domicile, resume file, expected salary */
 function needsProfileEnrich(c) {
+  // `salaryExpectation` is set by captureProfileDetails when the SEEK profile
+  // contains an "Expected monthly salary" screening question. Treat a missing
+  // salary as a reason to re-open the profile so we backfill the ATS field.
+  const salaryMissing =
+  !Object.prototype.hasOwnProperty.call(c, "salaryExpectation") &&
+  !Object.prototype.hasOwnProperty.call(c, "expectedSalaryRaw");
   return (
     !c.email ||
     !c.location ||
     !c.domicile ||
-    !hasResumeOnDisk(c)
+    !hasResumeOnDisk(c) ||
+    salaryMissing
   );
 }
 
@@ -1071,7 +1278,7 @@ function saveScrapeCheckpoint(candidates, lastPage) {
         maxAgeMonths: SCRAPER_CONFIG.maxAgeMonths,
         candidateCount: candidates.length,
         savedAt: new Date().toISOString(),
-        candidates,
+                   candidates,
       },
       null,
       2,
@@ -1102,10 +1309,10 @@ async function flushPendingImports() {
       try {
         const sendPromise = sendToNuanuATS(batch);
         const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(
-            () => reject(new Error(`Batch timeout after ${batchTimeoutMs / 1000}s`)),
-            batchTimeoutMs
-          )
+        setTimeout(
+          () => reject(new Error(`Batch timeout after ${batchTimeoutMs / 1000}s`)),
+                   batchTimeoutMs
+        )
         );
 
         const result = await Promise.race([sendPromise, timeoutPromise]);
@@ -1169,10 +1376,10 @@ function setupSigintHandler() {
       })();
 
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(
-          () => reject(new Error(`Force exit: flush exceeded ${flushTimeoutMs / 1000 / 60} minutes`)),
-          flushTimeoutMs
-        )
+      setTimeout(
+        () => reject(new Error(`Force exit: flush exceeded ${flushTimeoutMs / 1000 / 60} minutes`)),
+                 flushTimeoutMs
+      )
       );
 
       await Promise.race([flushPromise, timeoutPromise]);
@@ -1228,7 +1435,7 @@ function buildImportBatches(apiCandidates) {
   for (const candidate of apiCandidates) {
     const candidateBytes = Buffer.byteLength(JSON.stringify(candidate), "utf8");
     const wouldExceed =
-      current.length > 0 && currentBytes + candidateBytes > VERCEL_IMPORT_MAX_BYTES;
+    current.length > 0 && currentBytes + candidateBytes > VERCEL_IMPORT_MAX_BYTES;
 
     if (wouldExceed) {
       batches.push(current);
@@ -1252,7 +1459,7 @@ async function postCandidateBatch(batch) {
       "x-api-key": SCRAPER_CONFIG.nuanuApiKey,
     },
     body: JSON.stringify({ candidates: batch }),
-    signal: AbortSignal.timeout(batch.some((c) => c.resumeBase64) ? 180000 : 120000),
+                               signal: AbortSignal.timeout(batch.some((c) => c.resumeBase64) ? 180000 : 120000),
   });
 
   if (!response.ok) {
@@ -1271,6 +1478,10 @@ function payloadByteSize(payload) {
 
 /** Attach base64 resume from local downloads/ for API upload to Supabase */
 function buildApiCandidatePayload(c, { includeResume = true } = {}) {
+  // Extract stable SEEK profile UUID from profileUrl (?selected=UUID)
+  const _seekIdMatch = (c.profileUrl || "").match(/[?&]selected=([0-9a-f-]{36})/i);
+  const seekProfileId = _seekIdMatch ? _seekIdMatch[1] : null;
+
   const payload = {
     name: c.name,
     email: c.email,
@@ -1283,6 +1494,11 @@ function buildApiCandidatePayload(c, { includeResume = true } = {}) {
     source: c.source,
     location: c.location || null,
     domicile: c.domicile || c.location || null,
+    // FIX: stable identity key — ATS uses this to prevent rejected->new rollback
+    seekProfileId: seekProfileId || null,
+    // FIX: salary fields — set by captureProfileDetails() from SEEK profile tab
+    expectedSalaryRaw: c.expectedSalaryRaw || null,
+    salaryExpectation: c.salaryExpectation || null,
   };
 
   if (includeResume && c.resumeLocalPath && fs.existsSync(c.resumeLocalPath)) {
