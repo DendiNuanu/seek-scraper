@@ -523,19 +523,26 @@ export function extractCandidateDetailFromModal() {
 
   const root = findPanelRoot();
 
+  // TASK 1: STRICT email extraction — profile tab mailto link ONLY
+  // NEVER fallback to body text scan (picks up unrelated emails on the page)
+  // NEVER generate fake/synthetic email from phone number
   const mailto = root.querySelector('a[href^="mailto:"]');
   let email = null;
   if (mailto) {
-    email = (mailto.getAttribute("href") || "")
-    .replace(/^mailto:/i, "")
-    .split("?")[0]
-    .trim();
+    const raw = (mailto.getAttribute("href") || "")
+      .replace(/^mailto:/i, "")
+      .split("?")[0]
+      .trim()
+      .toLowerCase();
+    // Validate it looks like a real email
+    if (raw && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(raw)) {
+      email = raw;
+    }
   }
   if (!email) {
-    const body = root.innerText || "";
-    const m = body.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-    email = m ? m[0] : null;
+    console.log("[EMAIL MISSING - DO NOT GENERATE FAKE EMAIL]", { name: (root.querySelector("h1,h2") || {}).textContent });
   }
+  console.log("[EMAIL FROM SEEK]", email);
 
   const telLink = root.querySelector('a[href^="tel:"]');
   const phone =
@@ -675,6 +682,7 @@ export function extractCandidateDetailFromModal() {
   // Task 5: always log raw email so mismatches are visible in scraper output
   console.log("[SEEK RAW EMAIL]", JSON.stringify(email));
   console.log("[SEEK PROFILE ID]", JSON.stringify(seekProfileId));
+  console.log("[SALARY RAW]", JSON.stringify(expectedSalaryRaw));
 
   return {
     name,

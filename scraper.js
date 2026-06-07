@@ -817,7 +817,12 @@ async function captureProfileDetails(page, candidate, network) {
     console.log(`      📎 Resume: ${path.basename(resumePath)}`);
   }
 
-  return Boolean(candidate.email);
+  // TASK 1: Never block on missing email — seekProfileId + phone is sufficient identity
+  if (!candidate.email) {
+    console.log(`      [EMAIL MISSING] ${candidate.name} — will import with phone identity only`);
+  }
+  console.log(`      [SALARY FINAL] ${candidate.salaryExpectation ?? "null"}`);
+  return true; // Always continue — email is optional when seekProfileId available
 }
 
 async function enrichFromProfileUrl(page, candidate, profileUrl, returnUrl, network) {
@@ -826,7 +831,31 @@ async function enrichFromProfileUrl(page, candidate, profileUrl, returnUrl, netw
   // (the only tab where "Expected monthly salary" / "Gaji bulanan yang
   // diinginkan" is rendered).
   const profileTabUrl = withProfileTab(profileUrl);
-  await safeGoto(page, profileTabUrl);
+
+  // TASK 2: Fix profile tab race condition
+  // Navigate and wait for network to settle before extracting anything
+  try {
+    await page.goto(profileTabUrl, { waitUntil: "networkidle", timeout: 30000 });
+  } catch {
+    // networkidle can timeout on slow pages — fall back to domcontentloaded
+    await safeGoto(page, profileTabUrl);
+  }
+
+  // TASK 2+3: Wait specifically for salary element OR full profile content
+  const salaryReady = await page.waitForFunction(() => {
+    const txt = (document.body.innerText || "").toLowerCase();
+    return (
+      txt.includes("expected monthly salary") ||
+      txt.includes("gaji bulanan yang diinginkan") ||
+      txt.includes("application questions") ||
+      txt.includes("pertanyaan penyaringan") ||
+      // Profile loaded but no salary question (valid — not all jobs have it)
+      (txt.includes("career history") || txt.includes("riwayat pekerjaan"))
+    );
+  }, { timeout: 20000 }).then(() => true).catch(() => false);
+
+  console.log("[PROFILE TAB READY]", salaryReady ? "salary/content loaded" : "timeout — extracting anyway");
+
   await waitForCandidateDetailModal(page);
 
   const ok = await captureProfileDetails(page, candidate, network);
