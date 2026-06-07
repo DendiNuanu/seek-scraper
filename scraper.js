@@ -776,6 +776,8 @@ async function captureProfileDetails(page, candidate, network) {
   if (detail.email) candidate.email = detail.email;
   if (detail.phone) candidate.phone = detail.phone;
   if (detail.profileUrl) candidate.profileUrl = detail.profileUrl;
+  // FIX: propagate seekProfileId so ATS can use it as stable dedup key
+  if (detail.seekProfileId) candidate.seekProfileId = detail.seekProfileId;
   if (detail.location) {
     candidate.location = detail.location;
     candidate.domicile = detail.location;
