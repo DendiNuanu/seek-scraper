@@ -599,9 +599,9 @@ export function extractCandidateDetailFromModal() {
     if (isJobOrNoiseLine(t)) return false;
     if (t === name) return false;
 
-    // Pattern 1: Exact city names (single word)
+    // Pattern 1: Exact city names (single word) — expanded with many more Indonesian cities
     if (
-      /^(Bali|Jakarta|Surabaya|Bandung|Yogyakarta|Semarang|Medan|Denpasar|Malang|Solo|Bogor|Bekasi|Depok|Tangerang|Batam|Makassar|Palembang|Balikpapan|Cirebon|Padang|Pontianak|Manado|Ambon|Jayapura|Kupang|Mataram|Kendari|Palu|Tarakan|Samarinda|Banjarbaru|Pekanbaru|Jambi|Bengkulu|Lampung|Serang|Cilegon|Sukabumi|Garut|Tasikmalaya|Cimahi|South Tangerang|Jambi City)$/i.test(
+      /^(Bali|Jakarta|Surabaya|Bandung|Yogyakarta|Semarang|Medan|Denpasar|Malang|Solo|Bogor|Bekasi|Depok|Tangerang|Batam|Makassar|Palembang|Balikpapan|Cirebon|Padang|Pontianak|Manado|Ambon|Jayapura|Kupang|Mataram|Kendari|Palu|Tarakan|Samarinda|Banjarbaru|Pekanbaru|Jambi|Bengkulu|Lampung|Serang|Cilegon|Sukabumi|Garut|Tasikmalaya|Cimahi|South Tangerang|Jambi City|Jimbaran|Kuta|Ubud|Uluwatu|Canggu|Seminyak|Sanur|Nusa Dua|Tabanan|Singaraja|Gianyar|Karangasem|Buleleng|Mengwi|Abiansemal|Badung|Klungkung|Negara|Bangli|Amlapura|Selong|Praya|Gili|Lombok|Senggigi|Banyuwangi|Probolinggo|Pasuruan|Madiun|Magelang|Pekalongan|Tegal|Purwokerto|Kediri|Blitar|Mojokerto|Jember|Lumajang|Situbondo|Bondowoso|Banyumas|Cilacap|Purbalingga|Banjarnegara|Wonosobo|Temanggung|Boyolali|Sragen|Karanganyar|Wonogiri|Pati|Kudus|Jepara|Rembang|Blora|Grobogan|Pemalang|Brebes|Majalengka|Indramayu|Subang|Purwakarta|Karawang|Cianjur|Sumedang|Kuningan|Pangandaran|Pandeglang|Lebak|Tulungagung|Trenggalek|Ponorogo|Pacitan|Bojonegoro|Tuban|Lamongan|Gresik|Sidoarjo|Mojokerto|Jombang|Nganjuk|Ngawi|Magetan|Kebumen|Kendal|Batang|Salatiga|Metro|Dumai|Binjai|Langsa|Lhokseumawe|Sabang|Tebing\s+Tinggi|Pematangsiantar|Tanjungbalai|Sibolga|Padangsidimpuan|Gunungsitoli|Solok|Sawahlunto|Payakumbuh|Bukittinggi|Pariaman|Lubuklinggau|Prabumulih|Pagar\s+Alam|Batu|Tanjungpinang|Pangkalpinang|Bandarlampung|Bontang)$/i.test(
         t,
       )
     ) {
@@ -642,6 +642,21 @@ export function extractCandidateDetailFromModal() {
       if (/java|bali|sumatra|kalimantan|sulawesi|papua|banten|aceh|riau|lombok|maluku|jakarta|indonesia/.test(t.toLowerCase())) {
         return true;
       }
+    }
+
+    // Pattern 8: Catch-all — after isJobOrNoiseLine() has already filtered out
+    // emails, phone numbers, job titles (officer/manager/etc.), education lines,
+    // status words, and noise, any remaining short text (2–50 chars) that starts
+    // with a capital letter and isn't the candidate's name or a SEEK UI label is
+    // very likely a city/region. This catches cities like Jimbaran, Ubud, Kuta
+    // that aren't in the hardcoded lists above.
+    if (
+      t.length >= 2 &&
+      t.length <= 50 &&
+      /^[A-Z]/.test(t) &&
+      !/Profile|Resumé|Resume|Verification|Applications|Applied|Download|Screening/i.test(t)
+    ) {
+      return true;
     }
 
     return false;
