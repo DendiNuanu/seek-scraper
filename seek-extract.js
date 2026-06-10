@@ -396,7 +396,10 @@ export function extractYourCandidatesFromDom() {
   for (let rowIndex = 0; rowIndex < phoneLinks.length; rowIndex++) {
     const phoneLink = phoneLinks[rowIndex];
     const container = findRowContainer(phoneLink);
-    if (!container) continue;
+    if (!container) {
+      console.log(`      [DIAGNOSTIC] No container found for phone: ${phoneLink.textContent?.trim() || phoneLink.getAttribute('href')?.trim()}`);
+      continue;
+    }
 
     const rowText = (container.innerText || "").trim();
     const phone =
@@ -438,7 +441,15 @@ export function extractYourCandidatesFromDom() {
       );
     }
 
-    if (!name || !isLikelyPersonName(name)) continue;
+    if (!name || !isLikelyPersonName(name)) {
+      console.log(`      [DIAGNOSTIC] Skipping candidate - name: '${name || 'null'}', valid: ${!!name && isLikelyPersonName(name || '')}`);
+      if (name) {
+        const words = name.trim().split(/\s+/).filter(Boolean);
+        const core = words.filter((w) => w.length > 1);
+        console.log(`        words: ${words.length}, core: ${core.length}, matches: ${core.filter((w) => /^[A-Za-z]/.test(w)).join(', ')}`);
+      }
+      continue;
+    }
     name = name.replace(/\s+/g, " ");
 
     const key = `${name}|${phone.replace(/\D/g, "")}`;

@@ -1763,8 +1763,13 @@ async function main() {
       }
 
       saveScrapeCheckpoint(candidatesToEnrich, cp.lastPage || 0);
-      const deduped = dedupeCandidates(candidatesToEnrich);
-      if (!SCRAPER_CONFIG.scrapeOnly) {
+      // FIX: Send all candidates to ATS, even if they lack email/location
+      // The ATS should handle missing fields gracefully
+      const validCandidates = candidatesToEnrich.filter((c) => c.name && c.phone && c.phone.replace(/\D/g, '').length >= 10);
+      console.log(`  Sending ${validCandidates.length}/${candidatesToEnrich.length} candidates to ATS`);
+
+      if (!SCRAPER_CONFIG.scrapeOnly && validCandidates.length > 0) {
+        const deduped = dedupeCandidates(validCandidates);
         await sendToNuanuATS(deduped);
         saveScrapeCheckpoint(candidatesToEnrich, cp.lastPage || 0);
       } else {
