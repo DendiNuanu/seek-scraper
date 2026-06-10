@@ -43,13 +43,13 @@ const SCRAPER_CONFIG = {
   appliedAfter: process.env.APPLIED_AFTER ? new Date(process.env.APPLIED_AFTER) : null,
   maxJobs: parseInt(process.env.MAX_JOBS || "20", 10),
   delayMs: TURBO_MODE
-  ? parseInt(process.env.DELAY_MS || "1200", 10)
+  ? parseInt(process.env.DELAY_MS || "600", 10)
   : parseInt(process.env.DELAY_MS || "3500", 10),
   listSettleMs: TURBO_MODE
   ? parseInt(process.env.LIST_SETTLE_MS || "2000", 10)
   : parseInt(process.env.LIST_SETTLE_MS || "4500", 10),
   profileSettleMs: TURBO_MODE
-  ? parseInt(process.env.PROFILE_SETTLE_MS || "700", 10)
+  ? parseInt(process.env.PROFILE_SETTLE_MS || "500", 10)
   : parseInt(process.env.PROFILE_SETTLE_MS || "1200", 10),
   scrapeOnly: process.env.SCRAPE_ONLY === "true",
   fetchContactDetails: TURBO_MODE
@@ -60,6 +60,8 @@ const SCRAPER_CONFIG = {
   jobAccountingOfficer: process.env.SEEK_JOB_ACCOUNTING_OFFICER || "",
   resumeCheckpoint: process.env.RESUME_CHECKPOINT === "true",
   saveCheckpoint: process.env.SAVE_CHECKPOINT !== "false",
+  /** Skip resume download for speed (resumes are large and slow to download). */
+  skipResume: process.env.SKIP_RESUME === "true",
   /** Phase 2: enrich checkpoint (email, phone, location, resume) then optional ATS import */
   turboEnrich: process.env.TURBO_ENRICH === "true",
   turboEnrichCheckpoint:
@@ -72,10 +74,10 @@ const SCRAPER_CONFIG = {
     5,
     Math.max(1, parseInt(process.env.PARALLEL_LIST_PAGES || "1", 10)),
   ),
-  /** Phase 2: open profile URLs on N browser tabs in parallel (2–3 recommended) */
+  /** Phase 2: open profile URLs on N browser tabs in parallel (3–4 recommended for speed) */
   enrichConcurrency: Math.min(
-    4,
-    Math.max(1, parseInt(process.env.ENRICH_CONCURRENCY || "2", 10)),
+    6,
+    Math.max(1, parseInt(process.env.ENRICH_CONCURRENCY || "4", 10)),
   ),
 };
 
@@ -381,6 +383,11 @@ async function enrichCheckpointCandidates(context, candidates, network) {
       console.log(
         `  [w${workerId}] ${i + 1}/${queue.length} ${candidate.name}…`,
       );
+
+      // CRITICAL: Clear the shared network buffer before each profile load.
+      // Without this, API responses from OTHER workers' tabs leak into the
+      // current candidate via drainNetworkCandidatesInto().
+      if (network) network.candidates.length = 0;
 
       try {
         await enrichFromProfileUrl(page, candidate, candidate.profileUrl, null, network);
@@ -766,7 +773,9 @@ async function closeCandidateDetail(page, returnUrl) {
 }
 
 async function captureProfileDetails(page, candidate, network) {
-  if (network) drainNetworkCandidatesInto(network, candidate);
+  // DO NOT drain network BEFORE DOM extraction — the network buffer accumulates
+  // API responses from ALL browser tabs, including OTHER candidates' profiles.
+  // Draining here would cross-contaminate emails/phones between candidates.
 
   // The salary screening question only appears under the Profile tab.
   // Activate it (and wait for its content) before extracting anything.
@@ -817,12 +826,17 @@ async function captureProfileDetails(page, candidate, network) {
     console.log(`      💰 ${normalizedSalary}`);
   }
 
+  // Drain network AFTER DOM extraction — only use API data to fill gaps
   if (network) drainNetworkCandidatesInto(network, candidate);
 
-  const resumePath = await downloadResumeFromModal(page, candidate.name);
-  if (resumePath) {
-    candidate.resumeLocalPath = resumePath;
-    console.log(`      📎 Resume: ${path.basename(resumePath)}`);
+  if (!SCRAPER_CONFIG.skipResume) {
+    const resumePath = await downloadResumeFromModal(page, candidate.name);
+    if (resumePath) {
+      candidate.resumeLocalPath = resumePath;
+      console.log(`      📎 Resume: ${path.basename(resumePath)}`);
+    }
+  } else {
+    console.log(`      ⏭️  Resume skipped (SKIP_RESUME=true)`);
   }
 
   // TASK 1: Never block on missing email — seekProfileId + phone is sufficient identity
@@ -1318,11 +1332,12 @@ function needsProfileEnrich(c) {
   const salaryMissing =
   !Object.prototype.hasOwnProperty.call(c, "salaryExpectation") &&
   !Object.prototype.hasOwnProperty.call(c, "expectedSalaryRaw");
+  const resumeNeeded = !SCRAPER_CONFIG.skipResume && !hasResumeOnDisk(c);
   return (
     !c.email ||
     !c.location ||
     !c.domicile ||
-    !hasResumeOnDisk(c) ||
+    resumeNeeded ||
     salaryMissing
   );
 }

@@ -170,19 +170,21 @@ function normalizeApiCandidate(obj) {
   };
 }
 
-/** Merge richer fields from intercepted SEEK JSON into an in-memory candidate row. */
+/** Merge richer fields from intercepted SEEK JSON into an in-memory candidate row.
+ *  NEVER overwrites fields already set by DOM extraction — network API data is
+ *  lower priority because it may come from a different candidate's tab. */
 export function mergeApiFieldsIntoCandidate(target, apiRow) {
   if (!target || !apiRow) return target;
-  if (apiRow.email) target.email = apiRow.email;
-  if (apiRow.phone) target.phone = apiRow.phone;
-  if (apiRow.location) {
+  if (apiRow.email && !target.email) target.email = apiRow.email;
+  if (apiRow.phone && !target.phone) target.phone = apiRow.phone;
+  if (apiRow.location && !target.location) {
     target.location = apiRow.location;
     target.domicile = apiRow.domicile || apiRow.location;
   }
-  if (apiRow.profileUrl) target.profileUrl = apiRow.profileUrl;
-  if (apiRow.resumeUrl) target.resumeUrl = apiRow.resumeUrl;
-  if (apiRow.seekStatus) target.seekStatus = apiRow.seekStatus;
-  if (apiRow.appliedRole) target.appliedRole = apiRow.appliedRole;
+  if (apiRow.profileUrl && !target.profileUrl) target.profileUrl = apiRow.profileUrl;
+  if (apiRow.resumeUrl && !target.resumeUrl) target.resumeUrl = apiRow.resumeUrl;
+  if (apiRow.seekStatus && !target.seekStatus) target.seekStatus = apiRow.seekStatus;
+  if (apiRow.appliedRole && !target.appliedRole) target.appliedRole = apiRow.appliedRole;
   return target;
 }
 
@@ -500,7 +502,6 @@ export function extractCandidateDetailFromModal() {
    */
   function findPanelRoot() {
     // Strategy 1: element that contains both mailto AND a tab list
-    // This is the most reliable strategy as it requires both contact info and tabs
     const allLinks = [...document.querySelectorAll('a[href^="mailto:"]')];
     for (const link of allLinks) {
       let el = link.parentElement;
@@ -512,7 +513,20 @@ export function extractCandidateDetailFromModal() {
         el = el.parentElement;
       }
     }
-    // Strategy 2: aside element with content (improved - check for required elements)
+    // Strategy 1b: element with both a heading AND tab list (even without mailto)
+    const allH1H2 = [...document.querySelectorAll("h1, h2")];
+    for (const heading of allH1H2) {
+      const txt = (heading.textContent || "").trim();
+      if (txt.length < 2) continue;
+      let el = heading.parentElement;
+      for (let d = 0; d < 8 && el && el !== document.body; d++) {
+        if (el.querySelector('[role="tablist"], nav a, [role="tab"]')) {
+          return el;
+        }
+        el = el.parentElement;
+      }
+    }
+    // Strategy 2: aside element with content
     const aside = document.querySelector("aside");
     if (aside) {
       const asideText = aside.innerText || "";
@@ -526,7 +540,7 @@ export function extractCandidateDetailFromModal() {
     // Strategy 3: any section/div that contains "Application questions"
     const allEls = [...document.querySelectorAll("section, div, article")];
     for (const el of allEls) {
-      if (el.children.length > 30) continue; // too broad
+      if (el.children.length > 30) continue;
       const txt = (el.innerText || "").toLowerCase();
       if (
         (txt.includes("application questions") ||
@@ -534,6 +548,13 @@ export function extractCandidateDetailFromModal() {
         txt.includes("expected monthly salary")) &&
         txt.includes("career history")
       ) {
+        return el;
+      }
+    }
+    // Strategy 4: find a div that contains a heading AND a mailto/tel link
+    for (const link of allLinks) {
+      let el = link.closest("div, section, article");
+      if (el && el.querySelector("h1, h2") && el.innerText.length > 100) {
         return el;
       }
     }
@@ -776,16 +797,33 @@ export function extractCandidateDetailFromModal() {
     const lines = fullText.split("\n").map(l => l.trim()).filter(l => l.length > 0 && l.length < 100);
 
     for (const line of lines) {
-      // Check for patterns like:
-      // - "City, Region" (e.g., "Malang, East Java", "Tangerang, Banten")
-      // - "Region" (e.g., "East Java", "West Java", "Bali", "Jakarta")
-      const cityRegionPattern = /^[A-Z][a-z]+,\s*(East|West|Central|North|South)?\s*(Java|Sumatera|Bali|Kalimantan|Sulawesi|Papua|Banten|Aceh|Riau|Jambi|Nusa\s+Tenggara|Sumatera|Kalimantan)?$/i;
-      const regionOnlyPattern = /^(East|West|Central|North|South)\s+Java|Bali|Jakarta|Banten|Aceh|Riau|Jambi|Nusa\s+Tenggara|Sumatera|Kalimantan|Sulawesi|Papua$/i;
+      // Skip lines that are clearly not locations
+      if (!line || line === name || isJobOrNoiseLine(line) || isEducationLine(line)) continue;
+      if (line.length > 80) continue;
 
-      if (cityRegionPattern.test(line) || regionOnlyPattern.test(line)) {
+      // Use the comprehensive isSeekDomicileLine checker
+      if (isSeekDomicileLine(line)) {
         domicileLocation = normalizeDomicile(line);
         if (domicileLocation) {
           console.log(`      [LOCATION FROM PATTERN] ${domicileLocation}`);
+          break;
+        }
+      }
+    }
+  }
+
+  // Final fallback: scan ALL text in the effective root for any city-like token
+  if (!domicileLocation) {
+    const allWords = (effectiveRoot.innerText || effectiveRoot.textContent || "")
+      .split(/[\n,]+/)
+      .map(w => w.trim())
+      .filter(w => w.length > 1 && w.length < 50);
+
+    for (const word of allWords) {
+      if (isSeekDomicileLine(word)) {
+        domicileLocation = normalizeDomicile(word);
+        if (domicileLocation) {
+          console.log(`      [LOCATION FROM WORD SCAN] ${domicileLocation}`);
           break;
         }
       }
