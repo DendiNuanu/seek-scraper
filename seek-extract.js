@@ -489,6 +489,7 @@ export function extractCandidateDetailFromModal() {
    */
   function findPanelRoot() {
     // Strategy 1: element that contains both mailto AND a tab list
+    // This is the most reliable strategy as it requires both contact info and tabs
     const allLinks = [...document.querySelectorAll('a[href^="mailto:"]')];
     for (const link of allLinks) {
       let el = link.parentElement;
@@ -500,9 +501,17 @@ export function extractCandidateDetailFromModal() {
         el = el.parentElement;
       }
     }
-    // Strategy 2: aside element (SEEK sometimes wraps the panel in <aside>)
+    // Strategy 2: aside element with content (improved - check for required elements)
     const aside = document.querySelector("aside");
-    if (aside && (aside.innerText || "").length > 100) return aside;
+    if (aside) {
+      const asideText = aside.innerText || "";
+      const hasContact = aside.querySelector('a[href^="mailto:"]') !== null;
+      const hasTabs = aside.querySelector('[role="tab"], [role="tablist"]') !== null;
+      const hasName = aside.querySelector("h1, h2") !== null;
+      if (asideText.length > 100 && (hasContact || hasTabs || hasName)) {
+        return aside;
+      }
+    }
     // Strategy 3: any section/div that contains "Application questions"
     const allEls = [...document.querySelectorAll("section, div, article")];
     for (const el of allEls) {
@@ -517,7 +526,7 @@ export function extractCandidateDetailFromModal() {
         return el;
       }
     }
-    // Fallback: full body
+    // Fallback: full body (last resort)
     return document.body;
   }
 
@@ -579,7 +588,7 @@ export function extractCandidateDetailFromModal() {
 
     if (/^(East|West|Central|North|South)\s+Java$/i.test(t)) return true;
     if (
-      /^(Bali|Jakarta|Surabaya|Bandung|Yogyakarta|Semarang|Medan|Denpasar|Malang|Solo|Bogor|Bekasi|Depok|Tangerang|Batam|Makassar|Palembang|Balikpapan|Cirebon|Padang|Pontianak|Manado|Ambon|Jayapura|Kupang|Mataram|Kendari|Palu|Tarakan|Samarinda|Banjarbaru|Pekanbaru|Jambi|Bengkulu|Lampung|Serang|Cilegon|Sukabumi|Garut|Tasikmalaya|Cimahi)$/i.test(
+      /^(Bali|Jakarta|Surabaya|Bandung|Yogyakarta|Semarang|Medan|Denpasar|Malang|Solo|Bogor|Bekasi|Depok|Tangerang|Batam|Makassar|Palembang|Balikpapan|Cirebon|Padang|Pontianak|Manado|Ambon|Jayapura|Kupang|Mataram|Kendari|Palu|Tarakan|Samarinda|Banjarbaru|Pekanbaru|Jambi|Bengkulu|Lampung|Serang|Cilegon|Sukabumi|Garut|Tasikmalaya|Cimahi|Tangerang|South Tangerang|West Java|East Java|North Sumatera|Jambi City)$/i.test(
         t,
       )
     ) {
@@ -604,26 +613,47 @@ export function extractCandidateDetailFromModal() {
     return t.replace(/\s+/g, " ");
   };
 
+  // FIX BUG 2: Improved location extraction with user-suggested selectors
+  // Use 'aside' scope if root is body (fallback case)
+  const aside = root === document.body ? document.querySelector("aside") : root;
+  const effectiveRoot = aside || root;
+
   let domicileLocation = null;
 
-  const locAutomation = root.querySelector(
-    '[data-automation*="location"], [data-automation*="address"], [data-automation*="domicile"]',
-  );
-  if (locAutomation) {
-    domicileLocation = normalizeDomicile(locAutomation.textContent);
+  // FIX 1: data-testid selector (newer SEEK structure)
+  const locDataTest = effectiveRoot.querySelector('[data-testid="location"]');
+  if (locDataTest) {
+    domicileLocation = normalizeDomicile(locDataTest.textContent);
   }
 
-  // Pin icon row (location sits beside the map-pin SVG in the profile header)
+  // FIX 2: SVG pin icon + span selector (more specific than generic svg+span)
   if (!domicileLocation) {
-    for (const svg of root.querySelectorAll("svg")) {
-      const row =
-      svg.closest("div, span, p, li, [data-automation]")?.parentElement ||
-      svg.parentElement;
+    // Try aria-label for location pin
+    const locAria = effectiveRoot.querySelector('svg[aria-label*="location"] + span, svg[aria-label*="Location"] + span');
+    if (locAria) {
+      domicileLocation = normalizeDomicile(locAria.textContent);
+    }
+  }
+
+  // FIX 3: Pin icon row - improved selector to find location next to map pin
+  if (!domicileLocation) {
+    for (const svg of effectiveRoot.querySelectorAll("svg")) {
+      const ariaLabel = svg.getAttribute("aria-label") || "";
+      const title = svg.getAttribute("title") || "";
+      // Check if this is a location/map pin icon
+      const isLocationIcon = ariaLabel.toLowerCase().includes("location") ||
+                             ariaLabel.toLowerCase().includes("map") ||
+                             title.toLowerCase().includes("location") ||
+                             title.toLowerCase().includes("map");
+      if (!isLocationIcon) continue;
+
+      // Get the parent row of the SVG
+      const row = svg.closest("div, span, p, li, [data-automation]");
       if (!row) continue;
       const lines = (row.innerText || "")
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
       for (const line of lines) {
         const loc = normalizeDomicile(line);
         if (loc) {

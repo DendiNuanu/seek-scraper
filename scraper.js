@@ -772,8 +772,16 @@ async function captureProfileDetails(page, candidate, network) {
   // Activate it (and wait for its content) before extracting anything.
   await ensureProfileTabActive(page);
 
+  // FIX BUG 1: Log candidate name before extraction for debugging
+  console.log(`      [CAPTURE PROFILE DETAILS] Starting extraction for: ${candidate.name}`);
+
   const detail = await fetchContactFromDetailPanel(page);
-  if (detail.email) candidate.email = detail.email;
+  if (detail.email) {
+    console.log(`      [CAPTURE PROFILE DETAILS] Extracted email: ${detail.email}`);
+    candidate.email = detail.email;
+  } else {
+    console.log(`      [CAPTURE PROFILE DETAILS] No email extracted for: ${candidate.name}`);
+  }
   if (detail.phone) candidate.phone = detail.phone;
   if (detail.profileUrl) candidate.profileUrl = detail.profileUrl;
   // FIX: propagate seekProfileId so ATS can use it as stable dedup key
@@ -855,6 +863,37 @@ async function enrichFromProfileUrl(page, candidate, profileUrl, returnUrl, netw
   }, { timeout: 20000 }).then(() => true).catch(() => false);
 
   console.log("[PROFILE TAB READY]", salaryReady ? "salary/content loaded" : "timeout — extracting anyway");
+
+  await page.evaluate(async () => {
+    // Scroll the candidate detail panel so SEEK lazy-renders
+    // "Application questions" / "Pertanyaan penyaringan" at the bottom.
+    const panel =
+      document.querySelector("aside") ||
+      document.querySelector('[role="dialog"]') ||
+      document.querySelector('[class*="Panel"]') ||
+      document.querySelector('[class*="panel"]') ||
+      document.body;
+    const maxScroll = Math.max(panel.scrollHeight, document.body.scrollHeight, 2000);
+    for (let y = 0; y <= maxScroll; y += 400) {
+      panel.scrollTop = y;
+      await new Promise(r => setTimeout(r, 80));
+    }
+    panel.scrollTop = maxScroll;
+    await new Promise(r => setTimeout(r, 350));
+  }).catch(() => {});
+
+  // Re-check for salary after scroll reveals it
+  await page.waitForFunction(() => {
+    const txt = (document.body.innerText || "").toLowerCase();
+    return (
+      txt.includes("expected monthly salary") ||
+      txt.includes("gaji bulanan yang diinginkan") ||
+      txt.includes("application questions") ||
+      txt.includes("pertanyaan penyaringan") ||
+      txt.includes("career history") ||
+      txt.includes("riwayat pekerjaan")
+    );
+  }, { timeout: 8000 }).catch(() => {});
 
   await waitForCandidateDetailModal(page);
 
