@@ -40,16 +40,18 @@ const SCRAPER_CONFIG = {
   startPage: Math.max(1, parseInt(process.env.START_PAGE || "1", 10)),
   maxPages: Math.min(500, Math.max(1, parseInt(process.env.MAX_PAGES || "1", 10))),
   maxAgeMonths: Math.max(0, parseInt(process.env.MAX_AGE_MONTHS || "0", 10)),
+  /** Stop after candidates older than N days (e.g. MAX_AGE_DAYS=5). Overrides maxAgeMonths when set. */
+  maxAgeDays: Math.max(0, parseInt(process.env.MAX_AGE_DAYS || "0", 10)),
   appliedAfter: process.env.APPLIED_AFTER ? new Date(process.env.APPLIED_AFTER) : null,
   maxJobs: parseInt(process.env.MAX_JOBS || "20", 10),
   delayMs: TURBO_MODE
-  ? parseInt(process.env.DELAY_MS || "600", 10)
+  ? parseInt(process.env.DELAY_MS || "400", 10)
   : parseInt(process.env.DELAY_MS || "3500", 10),
   listSettleMs: TURBO_MODE
-  ? parseInt(process.env.LIST_SETTLE_MS || "2000", 10)
+  ? parseInt(process.env.LIST_SETTLE_MS || "1500", 10)
   : parseInt(process.env.LIST_SETTLE_MS || "4500", 10),
   profileSettleMs: TURBO_MODE
-  ? parseInt(process.env.PROFILE_SETTLE_MS || "500", 10)
+  ? parseInt(process.env.PROFILE_SETTLE_MS || "300", 10)
   : parseInt(process.env.PROFILE_SETTLE_MS || "1200", 10),
   scrapeOnly: process.env.SCRAPE_ONLY === "true",
   fetchContactDetails: TURBO_MODE
@@ -223,15 +225,19 @@ async function scrapeOneListPage(page, context, pageNum, network) {
   }
 
   const withinWindow = pageCandidates.filter((c) => {
-    const passesAge =
+    const passesMonths =
     SCRAPER_CONFIG.maxAgeMonths > 0
     ? isWithinMaxAgeMonths(c.appliedAt, SCRAPER_CONFIG.maxAgeMonths)
+    : true;
+    const passesDays =
+    SCRAPER_CONFIG.maxAgeDays > 0
+    ? isWithinMaxAgeDays(c.appliedAt, SCRAPER_CONFIG.maxAgeDays)
     : true;
     const passesDate =
     SCRAPER_CONFIG.appliedAfter instanceof Date && !Number.isNaN(SCRAPER_CONFIG.appliedAfter.getTime())
     ? isAppliedAfter(c.appliedAt, SCRAPER_CONFIG.appliedAfter)
     : true;
-    return passesAge && passesDate;
+    return passesMonths && passesDays && passesDate;
   });
 
   const skippedByAge = pageCandidates.length - withinWindow.length;
@@ -373,7 +379,9 @@ async function enrichCheckpointCandidates(context, candidates, network) {
 
   async function worker(workerId) {
     const page = await context.newPage();
-    await attachNetworkSniffer(page, network);
+    // Each worker gets its OWN network collector — eliminates all cross-contamination
+    const workerNetwork = createNetworkCollector();
+    await attachNetworkSniffer(page, workerNetwork);
 
     while (true) {
       const i = index++;
@@ -384,13 +392,8 @@ async function enrichCheckpointCandidates(context, candidates, network) {
         `  [w${workerId}] ${i + 1}/${queue.length} ${candidate.name}…`,
       );
 
-      // CRITICAL: Clear the shared network buffer before each profile load.
-      // Without this, API responses from OTHER workers' tabs leak into the
-      // current candidate via drainNetworkCandidatesInto().
-      if (network) network.candidates.length = 0;
-
       try {
-        await enrichFromProfileUrl(page, candidate, candidate.profileUrl, null, network);
+        await enrichFromProfileUrl(page, candidate, candidate.profileUrl, null, workerNetwork);
         done++;
         if (SCRAPER_CONFIG.importOnTheFly && !SCRAPER_CONFIG.scrapeOnly) {
           pendingImportCandidates.push(candidate);
@@ -1307,6 +1310,14 @@ function isWithinMaxAgeMonths(appliedAtLabel, maxAgeMonths) {
   const applied = parseRelativeAppliedAtToDate(appliedAtLabel);
   const cutoff = new Date();
   cutoff.setMonth(cutoff.getMonth() - maxAgeMonths);
+  return applied >= cutoff;
+}
+
+function isWithinMaxAgeDays(appliedAtLabel, maxAgeDays) {
+  if (!maxAgeDays || maxAgeDays <= 0) return true;
+  const applied = parseRelativeAppliedAtToDate(appliedAtLabel);
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - maxAgeDays);
   return applied >= cutoff;
 }
 
