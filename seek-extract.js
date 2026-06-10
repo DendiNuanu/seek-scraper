@@ -689,10 +689,39 @@ export function extractCandidateDetailFromModal() {
     return t.replace(/\s+/g, " ");
   };
 
-  // FIX BUG 2: Improved location extraction with user-suggested selectors
-  // Use 'aside' scope if root is body (fallback case)
-  const aside = root === document.body ? document.querySelector("aside") : root;
-  const effectiveRoot = aside || root;
+  // FIX BUG 2: Find the RIGHT panel — NOT the left sidebar list.
+  // When findPanelRoot() falls back to document.body, document.querySelector("aside")
+  // picks the FIRST <aside> on the page, which is the candidate LIST sidebar,
+  // NOT the profile detail panel. Instead, find the panel that contains the
+  // mailto link, phone, or candidate heading — that's the profile panel.
+  let effectiveRoot = root;
+  if (root === document.body) {
+    // Find the panel by looking for the common ancestor containing both
+    // mailto and tabs, OR the h1 heading and tabs.
+    const contactMailto = document.querySelector('a[href^="mailto:"]');
+    const heading = document.querySelector("h1, h2");
+    const startEl = contactMailto || heading;
+    if (startEl) {
+      let el = startEl.parentElement;
+      for (let d = 0; d < 10 && el && el !== document.body; d++) {
+        if (el.querySelector('[role="tab"], [role="tablist"]')) {
+          effectiveRoot = el;
+          break;
+        }
+        el = el.parentElement;
+      }
+    }
+    // If still not found, try aside that has tab navigation (not the list sidebar)
+    if (effectiveRoot === document.body) {
+      const asides = [...document.querySelectorAll("aside")];
+      for (const a of asides) {
+        if (a.querySelector('[role="tab"], [role="tablist"]')) {
+          effectiveRoot = a;
+          break;
+        }
+      }
+    }
+  }
 
   // DIAGNOSTIC: Log effective root details
   const effectiveText = (effectiveRoot.innerText || effectiveRoot.textContent || "");
