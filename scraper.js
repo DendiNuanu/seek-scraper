@@ -379,7 +379,7 @@ async function enrichCheckpointCandidates(context, candidates, network) {
 
   async function worker(workerId) {
     const page = await context.newPage();
-    // Each worker gets its OWN network collector — eliminates all cross-contamination
+    // Each worker gets its OWN network collector — eliminates cross-tab contamination.
     const workerNetwork = createNetworkCollector();
     await attachNetworkSniffer(page, workerNetwork);
 
@@ -393,6 +393,12 @@ async function enrichCheckpointCandidates(context, candidates, network) {
       );
 
       try {
+        // CRITICAL: Clear the network buffer BEFORE each candidate.
+        // SEEK API responses from the previous profile navigation accumulate
+        // in the worker's collector.  If we don't clear, drainNetworkCandidatesInto
+        // will merge entries meant for Candidate N-1 into Candidate N.
+        workerNetwork.candidates.length = 0;
+
         await enrichFromProfileUrl(page, candidate, candidate.profileUrl, null, workerNetwork);
         done++;
         if (SCRAPER_CONFIG.importOnTheFly && !SCRAPER_CONFIG.scrapeOnly) {
@@ -1354,9 +1360,57 @@ function needsProfileEnrich(c) {
 }
 
 function drainNetworkCandidatesInto(network, candidate) {
+  if (!network || !candidate) return;
+
+  // SEEK API returns batch responses containing ALL pipeline candidates.
+  // We must match by NAME, not just take the first entry with an email.
+  // Drain ALL entries and keep only the one that matches this candidate.
+  let bestMatch = null;
+  let bestScore = -1;
+
   while (network.candidates.length > 0) {
     const row = network.candidates.shift();
-    mergeApiFieldsIntoCandidate(candidate, row);
+    if (!row) continue;
+
+    // Score how well the API row name matches the candidate name.
+    // Prefer exact match; fall back to word-level fuzzy match.
+    const rowName = (row.name || "").toLowerCase().replace(/\s+/g, " ").trim();
+    const candName = (candidate.name || "").toLowerCase().replace(/\s+/g, " ").trim();
+
+    if (!rowName || !candName) {
+      // No name to match — merge only if there's gap data AND no better match later
+      mergeApiFieldsIntoCandidate(candidate, row);
+      continue;
+    }
+
+    if (rowName === candName) {
+      // Exact match — merge immediately (highest priority)
+      mergeApiFieldsIntoCandidate(candidate, row);
+      bestMatch = row;
+      bestScore = 999;
+      continue;
+    }
+
+    // Word-level overlap score
+    const rowWords = new Set(rowName.split(" ").filter(w => w.length > 1));
+    const candWords = new Set(candName.split(" ").filter(w => w.length > 1));
+    if (rowWords.size === 0 || candWords.size === 0) continue;
+
+    let overlap = 0;
+    for (const w of rowWords) {
+      if (candWords.has(w)) overlap++;
+    }
+    const score = overlap / Math.max(rowWords.size, candWords.size);
+
+    if (score > 0.6 && score > bestScore) {
+      bestMatch = row;
+      bestScore = score;
+    }
+  }
+
+  // Merge the best fuzzy match (if any and no exact match was found)
+  if (bestMatch && bestScore < 999) {
+    mergeApiFieldsIntoCandidate(candidate, bestMatch);
   }
 }
 
