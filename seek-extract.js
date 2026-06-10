@@ -579,23 +579,41 @@ export function extractCandidateDetailFromModal() {
   /officer|manager|designer|staff|engineer|consultant/i.test(line) ||
   isEducationLine(line);
 
-  /** SEEK shows domicile as a short region/city line under contact (e.g. Jakarta, East Java, Bali). */
+  /** SEEK shows domicile as a short region/city line under contact.
+   *  Handles formats like: "Malang, East Java", "Tangerang, Banten", "Jambi City, Jambi", "West Java"
+   */
   const isSeekDomicileLine = (line) => {
     const t = (line || "").trim();
-    if (!t || t.length < 2 || t.length > 55) return false;
+    if (!t || t.length < 2 || t.length > 80) return false;
     if (isJobOrNoiseLine(t)) return false;
     if (t === name) return false;
 
-    if (/^(East|West|Central|North|South)\s+Java$/i.test(t)) return true;
+    // Pattern 1: Exact city names (single word)
     if (
-      /^(Bali|Jakarta|Surabaya|Bandung|Yogyakarta|Semarang|Medan|Denpasar|Malang|Solo|Bogor|Bekasi|Depok|Tangerang|Batam|Makassar|Palembang|Balikpapan|Cirebon|Padang|Pontianak|Manado|Ambon|Jayapura|Kupang|Mataram|Kendari|Palu|Tarakan|Samarinda|Banjarbaru|Pekanbaru|Jambi|Bengkulu|Lampung|Serang|Cilegon|Sukabumi|Garut|Tasikmalaya|Cimahi|Tangerang|South Tangerang|West Java|East Java|North Sumatera|Jambi City)$/i.test(
+      /^(Bali|Jakarta|Surabaya|Bandung|Yogyakarta|Semarang|Medan|Denpasar|Malang|Solo|Bogor|Bekasi|Depok|Tangerang|Batam|Makassar|Palembang|Balikpapan|Cirebon|Padang|Pontianak|Manado|Ambon|Jayapura|Kupang|Mataram|Kendari|Palu|Tarakan|Samarinda|Banjarbaru|Pekanbaru|Jambi|Bengkulu|Lampung|Serang|Cilegon|Sukabumi|Garut|Tasikmalaya|Cimahi|South Tangerang|Jambi City)$/i.test(
         t,
       )
     ) {
       return true;
     }
+
+    // Pattern 2: City with region (e.g., "Malang, East Java", "Tangerang, Banten")
+    if (/^[^,]+,\s*(East|West|Central|North|South)\s+Java$/i.test(t)) return true;
+    if (/^[^,]+,\s*(Bali|Jakarta|Banten|Jambi|Aceh|Riau|Kepri)$/i.test(t)) return true;
+    if (/^[^,]+,\s*(Sumatera|Kalimantan|Sulawesi|Papua|Nusa\s+Tenggara)$/i.test(t)) return true;
+
+    // Pattern 3: Region names only (e.g., "East Java", "West Java", "South Tangerang")
+    if (/^(East|West|Central|North|South)\s+Java$/i.test(t)) return true;
+    if (/^(Bali|Jakarta|Banten|Jambi|Aceh|Riau|Kepri)$/i.test(t)) return true;
+    if (/^(Sumatera|Kalimantan|Sulawesi|Papua|Nusa\s+Tenggara)$/i.test(t)) return true;
+
+    // Pattern 4: Jakarta DKI or DI Yogyakarta format
     if (/^(DKI|DI)\s/i.test(t)) return true;
+
+    // Pattern 5: Kabupaten/Kota format
     if (/^(Kabupaten|Kota)\s/i.test(t)) return true;
+
+    // Pattern 6: General region keywords in Indonesia
     if (
       /java|jakarta|bali|yogyakarta|sumatra|sumatera|kalimantan|sulawesi|papua|banten|aceh|riau|lombok|maluku|nusa\s+tenggara|ntb|ntt|indonesia|jawa\s+timur|jawa\s+tengah|jawa\s+barat/i.test(
         t,
@@ -604,6 +622,17 @@ export function extractCandidateDetailFromModal() {
     ) {
       return true;
     }
+
+    // Pattern 7: City followed by comma and anything (for "City, Region" format)
+    // This catches "Malang, East Java", "Tangerang, Banten", etc.
+    const cityRegionPattern = /^[A-Z][a-z]+,\s+[A-Z][a-z]+/i;
+    if (cityRegionPattern.test(t) && t.length < 60) {
+      // Verify it contains location keywords
+      if (/java|bali|sumatra|kalimantan|sulawesi|papua|banten|aceh|riau|lombok|maluku|jakarta|indonesia/.test(t.toLowerCase())) {
+        return true;
+      }
+    }
+
     return false;
   };
 
@@ -709,10 +738,34 @@ export function extractCandidateDetailFromModal() {
   const _seekIdMatch = (profileUrl || "").match(/[?&]selected=([0-9a-f-]{36})/i);
   const seekProfileId = _seekIdMatch ? _seekIdMatch[1] : null;
 
+  // FIX: Comprehensive location extraction - try multiple patterns
+  // If all DOM-based methods failed, extract location from text content
+  if (!domicileLocation) {
+    const fullText = effectiveRoot.innerText || effectiveRoot.textContent || "";
+    const lines = fullText.split("\n").map(l => l.trim()).filter(l => l.length > 0 && l.length < 100);
+
+    for (const line of lines) {
+      // Check for patterns like:
+      // - "City, Region" (e.g., "Malang, East Java", "Tangerang, Banten")
+      // - "Region" (e.g., "East Java", "West Java", "Bali", "Jakarta")
+      const cityRegionPattern = /^[A-Z][a-z]+,\s*(East|West|Central|North|South)?\s*(Java|Sumatera|Bali|Kalimantan|Sulawesi|Papua|Banten|Aceh|Riau|Jambi|Nusa\s+Tenggara|Sumatera|Kalimantan)?$/i;
+      const regionOnlyPattern = /^(East|West|Central|North|South)\s+Java|Bali|Jakarta|Banten|Aceh|Riau|Jambi|Nusa\s+Tenggara|Sumatera|Kalimantan|Sulawesi|Papua$/i;
+
+      if (cityRegionPattern.test(line) || regionOnlyPattern.test(line)) {
+        domicileLocation = normalizeDomicile(line);
+        if (domicileLocation) {
+          console.log(`      [LOCATION FROM PATTERN] ${domicileLocation}`);
+          break;
+        }
+      }
+    }
+  }
+
   // Task 5: always log raw email so mismatches are visible in scraper output
   console.log("[SEEK RAW EMAIL]", JSON.stringify(email));
   console.log("[SEEK PROFILE ID]", JSON.stringify(seekProfileId));
   console.log("[SALARY RAW]", JSON.stringify(expectedSalaryRaw));
+  console.log(`      [FINAL LOCATION] ${domicileLocation || "NOT FOUND"}`);
 
   return {
     name,
