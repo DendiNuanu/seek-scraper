@@ -647,6 +647,11 @@ export function extractCandidateDetailFromModal() {
   const aside = root === document.body ? document.querySelector("aside") : root;
   const effectiveRoot = aside || root;
 
+  // DIAGNOSTIC: Log effective root details
+  const effectiveText = (effectiveRoot.innerText || effectiveRoot.textContent || "");
+  console.log(`      [DIAGNOSTIC] Effective root text length: ${effectiveText.length}`);
+  console.log(`      [DIAGNOSTIC] Has data-testid: ${effectiveRoot.querySelector('[data-testid]') !== null}`);
+
   let domicileLocation = null;
 
   // FIX 1: data-testid selector (newer SEEK structure)
