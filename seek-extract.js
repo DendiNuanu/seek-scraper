@@ -746,7 +746,26 @@ export function extractCandidateDetailFromModal() {
     }
   }
 
-  // Header lines immediately after phone / email (SEEK order: role → email | phone → location → education)
+  // Strategy A: look for location in the contact-row container (mailto+phone parent)
+  if (!domicileLocation && mailto) {
+    // Walk up from the mailto link to find a container with both contact info and location
+    let contactContainer = mailto.parentElement;
+    for (let d = 0; d < 6 && contactContainer && contactContainer !== document.body; d++) {
+      const txt = (contactContainer.innerText || "").trim();
+      if (txt.length > 30 && txt.length < 500) {
+        const lines = txt.split("\n").map(s => s.trim()).filter(Boolean);
+        for (const line of lines) {
+          if (line === name || line.includes("@") || line.startsWith("+") || line === phone) continue;
+          const loc = normalizeDomicile(line);
+          if (loc) { domicileLocation = loc; break; }
+        }
+        if (domicileLocation) break;
+      }
+      contactContainer = contactContainer.parentElement;
+    }
+  }
+
+  // Strategy B: Header lines immediately after phone / email (SEEK order: role → email | phone → location → education)
   if (!domicileLocation) {
     const headerRoot =
     h1?.closest("header, section, div") ||
@@ -772,10 +791,31 @@ export function extractCandidateDetailFromModal() {
     }
   }
 
+  // Strategy C: scan elements near the mailto/phone links specifically
+  if (!domicileLocation) {
+    const contactEl = mailto || telLink;
+    if (contactEl) {
+      let parent = contactEl.parentElement;
+      for (let d = 0; d < 8 && parent && parent !== document.body; d++) {
+        for (const el of parent.querySelectorAll("span, p, div, li")) {
+          if (el.children.length > 3) continue;
+          const t = (el.textContent || "").trim();
+          if (!t || t === name || t.includes("@") || t.startsWith("+") || t === phone) continue;
+          const loc = normalizeDomicile(t);
+          if (loc) { domicileLocation = loc; break; }
+        }
+        if (domicileLocation) break;
+        parent = parent.parentElement;
+      }
+    }
+  }
+
+  // Strategy D: scan ALL elements in root (existing fallback)
   if (!domicileLocation) {
     const locEl = [...root.querySelectorAll("span, p, div, li")].find((el) => {
       if (el.children.length > 2) return false;
       const t = (el.textContent || "").trim();
+      if (t === name || t === phone || t.includes("@")) return false;
       return isSeekDomicileLine(t);
     });
     if (locEl) domicileLocation = normalizeDomicile(locEl.textContent);
