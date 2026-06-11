@@ -217,6 +217,20 @@ async function scrapeOneListPage(page, context, pageNum, network) {
   const pageCandidates = await page.evaluate(extractYourCandidatesFromDom);
   console.log(`  Found ${pageCandidates.length} candidates on page ${pageNum}`);
 
+  // Merge network API data (location, email, profileUrl) into DOM candidates.
+  // SEEK API responses contain location/domicile that the DOM extraction misses.
+  if (network && network.candidates.length > 0) {
+    for (const c of pageCandidates) {
+      const candName = (c.name || "").toLowerCase().replace(/\s+/g, " ").trim();
+      for (const apiRow of network.candidates) {
+        const apiName = (apiRow.name || "").toLowerCase().replace(/\s+/g, " ").trim();
+        if (apiName === candName) {
+          mergeApiFieldsIntoCandidate(c, apiRow);
+        }
+      }
+    }
+  }
+
   if (pageCandidates.length === 0) {
     if (pageNum === SCRAPER_CONFIG.startPage) {
       await logDomDiagnostics(page, "your-candidates");
