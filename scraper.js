@@ -824,128 +824,100 @@ async function captureProfileDetails(page, candidate, network) {
     console.log(`      📍 ${detail.location}`);
   }
 
-  // LOCATION EXTRACTION - surgical replacement
-  // Targets SEEK Indonesia employer dashboard aside panel DOM patterns.
+  // LOCATION EXTRACTION — targets SEEK Indonesia div-based detail panel.
+  // SEEK Indonesia uses nested <div> elements, NOT <aside>.
+  // Location appears as a non-link text element after the tel: link on the page.
   let location = null;
 
-  // DEBUG: dump aside structure once to identify correct selector
-  // REMOVE THIS after location extraction is confirmed working
-  const asideDebug = await page.evaluate(() => {
-    const aside = document.querySelector('aside[data-automation="candidateDetailsDrawer"]')
-               || document.querySelector('aside');
-    if (!aside) return 'NO ASIDE FOUND';
-    // Return first 2000 chars of aside outerHTML for inspection
-    return aside.outerHTML.slice(0, 2000);
-  }).catch(() => 'EVAL ERROR');
-  console.log(`      [ASIDE DEBUG] ${asideDebug.slice(0, 500)}`);
-
   location = await page.evaluate(() => {
-    // Helper: clean and validate location text
+    // SEEK uses randomized class names — target by DOM position, not class
+    // Location appears as a non-link text element immediately after the tel: link
+
     const isValidLocation = (text) => {
       if (!text || typeof text !== 'string') return false;
       const t = text.trim();
       if (t.length < 2 || t.length > 80) return false;
-      if (t.includes('@')) return false;           // email
-      if (/^\+?[\d\s\-()]{5,}$/.test(t)) return false; // phone
-      if (/\d{4}/.test(t)) return false;           // year/number heavy
-      if (t.includes('Bachelor') || t.includes('Master') ||
-          t.includes('Doctor') || t.includes('Diploma')) return false; // education
-      if (['New','Inbox','Shortlist','Interview','Offer','Prescreen',
-           'Not Suitable','Accept'].includes(t)) return false; // SEEK status labels
-      // Must look like a place name: letters, spaces, commas, dots, hyphens only
+      if (t.includes('@')) return false;
+      if (/^\+?[\d\s\-().]+$/.test(t)) return false;
+      if (/\b(Bachelor|Master|Doctor|Diploma|Sarjana|S\.H|S\.T|S\.E|MBA|SMA|SMK|2019|2020|2021|2022|2023|2024|2025|2026)\b/i.test(t)) return false;
+      if (/^(New|Inbox|Shortlist|Interview|Offer|Prescreen|Not Suitable|Accept|Verified|Applied)$/i.test(t)) return false;
       if (!/^[A-Za-z\s,.\-']+$/.test(t)) return false;
       return true;
     };
 
-    const aside = document.querySelector('aside[data-automation="candidateDetailsDrawer"]')
-               || document.querySelector('aside[data-testid="candidate-detail"]')
-               || document.querySelector('aside');
+    // Strategy: find the tel: link, then walk forward through siblings/cousins
+    // to find the first valid location-like text that is NOT a link
 
-    if (!aside) return null;
+    // Step 1: find the phone <a> tag anywhere on the page
+    const phoneLink = document.querySelector('a[href^="tel:"]');
+    if (!phoneLink) return null;
 
-    // Attempt 1: data-automation contains "location" (SEEK's own attribute)
-    const autoLoc = aside.querySelector(
-      '[data-automation="candidateLocation"], [data-automation="candidate-location"], [data-automation*="ocation"]'
-    );
-    if (autoLoc) {
-      const t = autoLoc.textContent?.trim();
-      if (isValidLocation(t)) return t;
+    // Step 2: get the container that holds email+phone+location together
+    // Walk up until we find a parent that also contains non-link text siblings
+    let container = phoneLink.parentElement;
+    for (let i = 0; i < 5; i++) {
+      if (!container) break;
+      const allLinks = container.querySelectorAll('a[href^="tel:"], a[href^="mailto:"]');
+      if (allLinks.length > 0) break;
+      container = container.parentElement;
     }
 
-    // Attempt 2: data-testid contains "location"
-    const testLoc = aside.querySelector('[data-testid*="location"], [data-testid*="Location"]');
-    if (testLoc) {
-      const t = testLoc.textContent?.trim();
-      if (isValidLocation(t)) return t;
+    // Step 3: get the grandparent section that contains email, phone, AND location
+    // Location is a sibling or near-sibling of the phone link's parent
+    let searchRoot = phoneLink.parentElement;
+    // Go up 1-3 levels to find the section containing all contact info
+    for (let up = 0; up < 3; up++) {
+      if (!searchRoot) break;
+      const hasPhone = searchRoot.querySelector('a[href^="tel:"]');
+      const hasEmail = searchRoot.querySelector('a[href^="mailto:"]');
+      if (hasPhone && hasEmail) break;
+      searchRoot = searchRoot.parentElement;
     }
+    if (!searchRoot) return null;
 
-    // Attempt 3: SVG with aria-label="Location" → get parent or next sibling text
-    const locationSvg = aside.querySelector(
-      'svg[aria-label="Location"], svg[aria-label="location"], svg[title="Location"]'
-    );
-    if (locationSvg) {
-      // Try parent element's text content (excluding the SVG itself)
-      const parent = locationSvg.parentElement;
-      if (parent) {
-        const clone = parent.cloneNode(true);
-        clone.querySelectorAll('svg').forEach(s => s.remove());
-        const t = clone.textContent?.trim();
-        if (isValidLocation(t)) return t;
-      }
-      // Try next sibling
-      const next = locationSvg.nextElementSibling || locationSvg.nextSibling;
-      if (next) {
-        const t = (next.textContent || next.nodeValue || '').trim();
-        if (isValidLocation(t)) return t;
-      }
-    }
+    // Step 4: within this section, find all text-only elements (not links)
+    // that come AFTER the phone element in DOM order
+    const allElements = Array.from(searchRoot.querySelectorAll('span, div, p'));
 
-    // Attempt 4: Find phone link in aside, then check elements AFTER it
-    // Location typically appears as a non-link element after email/phone
-    const allLinks = Array.from(aside.querySelectorAll('a'));
-    const phoneLink = allLinks.find(a => a.href?.startsWith('tel:'));
-    if (phoneLink) {
-      // Check siblings AFTER the phone link
-      let sibling = phoneLink.nextElementSibling;
-      let attempts = 0;
-      while (sibling && attempts < 5) {
-        if (sibling.tagName !== 'A') {
-          const svgOnly = sibling.querySelectorAll('svg').length > 0 &&
-                          sibling.children.length === 1;
-          if (!svgOnly) {
-            const clone = sibling.cloneNode(true);
-            clone.querySelectorAll('svg, button, [role="button"]').forEach(e => e.remove());
-            const t = clone.textContent?.trim();
-            if (isValidLocation(t)) return t;
-          }
-        }
-        sibling = sibling.nextElementSibling;
-        attempts++;
+    // Find index of phone link's closest ancestor within searchRoot's children
+    let phoneIdx = -1;
+    for (let i = 0; i < allElements.length; i++) {
+      if (allElements[i].contains(phoneLink)) {
+        phoneIdx = i;
+        break;
       }
     }
 
-    // Attempt 5: Scan ALL leaf-node spans/divs/li in aside for location-like text
-    // Only look in the top summary section (first 3000 chars of aside innerHTML)
-    const asideHTML = aside.innerHTML.slice(0, 3000);
-    const tempDiv = document.createElement('div');
-    tempDiv.innerHTML = asideHTML;
-
-    const candidates = tempDiv.querySelectorAll('span, p, div, li');
-    for (const el of candidates) {
-      if (el.children.length > 0) continue; // leaf nodes only
-      const t = el.textContent?.trim();
-      if (isValidLocation(t) && t.includes(',')) {
-        // Prefer "City, Province" format (has comma)
-        return t;
-      }
+    // Look at elements after phone for location text
+    const startIdx = phoneIdx >= 0 ? phoneIdx + 1 : 0;
+    for (let i = startIdx; i < Math.min(startIdx + 10, allElements.length); i++) {
+      const el = allElements[i];
+      // Skip if it contains links (email/phone elements)
+      if (el.querySelector('a')) continue;
+      // Skip if it contains child elements (we want leaf/near-leaf nodes)
+      if (el.children.length > 2) continue;
+      const text = el.textContent?.trim();
+      if (isValidLocation(text)) return text;
     }
-    // Second pass: accept single-word locations too
-    for (const el of candidates) {
-      if (el.children.length > 0) continue;
-      const t = el.textContent?.trim();
-      if (isValidLocation(t) && t.length > 3) {
-        return t;
+
+    // Fallback: scan entire visible page for first "City, Province" pattern
+    // after the phone link in DOM order
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let foundPhone = false;
+    let node;
+    while ((node = walker.nextNode())) {
+      const text = node.textContent?.trim();
+      if (!text) continue;
+      // Mark when we pass the phone number
+      if (text.includes(phoneLink.textContent?.replace('tel:', '').trim())) {
+        foundPhone = true;
+        continue;
       }
+      if (!foundPhone) continue;
+      // After phone, first valid location wins
+      if (isValidLocation(text)) return text;
+      // Stop if we hit education info
+      if (/\b(Bachelor|Sarjana|Master|Doctor|Diploma|SMA|SMK|20\d{2})\b/i.test(text)) break;
     }
 
     return null;
