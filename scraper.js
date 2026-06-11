@@ -824,6 +824,55 @@ async function captureProfileDetails(page, candidate, network) {
     console.log(`      📍 ${detail.location}`);
   }
 
+  // Additional location extraction targeting SEEK Indonesia DOM patterns
+  // (data-testid, SVG map pin sibling, short text scan).
+  const locationFromPanel = await page.evaluate(() => {
+    const aside = document.querySelector('aside[data-automation="candidate-detail-panel"]')
+                   || document.querySelector('aside');
+    if (!aside) return null;
+
+    // Fallback 1: data-testid / data-automation location attribute
+    const byAttr = aside.querySelector('[data-testid="location"], [data-testid*="location"], [data-automation*="location"]');
+    if (byAttr?.textContent?.trim()) return byAttr.textContent.trim();
+
+    // Fallback 2: SVG map pin sibling — find SVG, walk up to parent, check its text
+    const svgs = aside.querySelectorAll('svg');
+    for (const svg of svgs) {
+      const parent = svg.closest('li, div, span');
+      if (!parent) continue;
+      const text = parent.textContent?.trim();
+      if (text && /^[A-Za-z\s,.]+$/.test(text) && text.length > 2 && text.length < 60) {
+        if (!text.includes('@') && !text.match(/\d/) &&
+            !text.toLowerCase().includes('bachelor') &&
+            !text.toLowerCase().includes('master')) {
+          return text;
+        }
+      }
+    }
+
+    // Fallback 3: scan leaf text nodes for "City" or "City, Province" pattern
+    const leafElements = aside.querySelectorAll('span, p, div');
+    for (const el of leafElements) {
+      if (el.children.length > 0) continue;
+      const text = el.textContent?.trim();
+      if (!text) continue;
+      if (/^[A-Z][a-zA-Z\s]{2,40}(,\s*[A-Z][a-zA-Z\s]{2,30})?$/.test(text)) {
+        if (!text.includes('@') && !text.match(/\d/) &&
+            !['New', 'Inbox', 'Shortlist', 'Interview', 'Offer'].includes(text)) {
+          return text;
+        }
+      }
+    }
+
+    return null;
+  });
+
+  if (locationFromPanel && !candidate.location) {
+    candidate.location = locationFromPanel;
+    candidate.domicile = locationFromPanel;
+  }
+  console.log(`      [LOCATION] ${candidate.location || 'NOT FOUND'}`);
+
   // Expected monthly salary (screening question). Profile-tab is the only
   // source of truth — we do NOT fall back to the résumé tab. When no salary
   // label is found we explicitly persist `null` so the ATS won't re-poll.
@@ -1126,10 +1175,34 @@ async function enrichYourCandidatesOnPage(
   let enriched = 0;
   let detailCount = 0;
 
+  // Extract locations from candidate cards on the list page as fallback
+  const cardLocations = await page.evaluate(() => {
+    const map = {};
+    const rows = document.querySelectorAll('a[href*="?selected="], [data-automation*="candidate-item"], tr[class]');
+    for (const row of rows) {
+      const locEl = row.querySelector('[data-automation*="location"], [data-testid*="location"], [class*="location"]');
+      const telEl = row.querySelector('a[href^="tel:"]');
+      const phone = (telEl?.getAttribute('href') || '').replace(/\D/g, '');
+      const location = locEl?.textContent?.trim() || null;
+      if (location && phone) map[phone] = location;
+    }
+    return map;
+  });
+
   for (const candidate of pageCandidates) {
     if (maxToOpen > 0 && detailCount >= maxToOpen) break;
 
     const label = candidate.name;
+
+    // Apply card-level location as fallback before opening detail panel
+    if (!candidate.location) {
+      const phoneDigits = (candidate.phone || '').replace(/\D/g, '');
+      if (phoneDigits && cardLocations[phoneDigits]) {
+        candidate.location = cardLocations[phoneDigits];
+        candidate.domicile = cardLocations[phoneDigits];
+      }
+    }
+
     console.log(`  👤 Opening profile: ${label}…`);
 
     await dismissSeekOverlays(page);
