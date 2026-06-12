@@ -2053,7 +2053,7 @@ async function sendToNuanuATS(candidates) {
   console.log(`  ⏭️  Skipped:   ${totalSkipped}`);
   console.log(`  ❌ Errors:    ${totalErrors}`);
   console.log("\n🎉 Done! Check your dashboard:");
-  console.log("   https://nuanu-hr-recruitment-ats.vercel.app/dashboard/candidates");
+  console.log("   https://hr-ats.nuanu.site/dashboard/candidates");
 
   if (totalErrors === 0) {
     for (const c of unsent) {
