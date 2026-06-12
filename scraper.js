@@ -840,7 +840,23 @@ async function captureProfileDetails(page, candidate, network) {
       if (t.includes('@')) return false;
       if (/^\+?[\d\s\-().]+$/.test(t)) return false;
       if (/\b(Bachelor|Master|Doctor|Diploma|Sarjana|S\.H|S\.T|S\.E|MBA|SMA|SMK|2019|2020|2021|2022|2023|2024|2025|2026)\b/i.test(t)) return false;
-      if (/^(New|Inbox|Shortlist|Interview|Offer|Prescreen|Not Suitable|Accept|Verified|Applied)$/i.test(t)) return false;
+      const SEEK_LABELS = [
+        'New', 'Inbox', 'Shortlist', 'Interview', 'Offer', 'Prescreen',
+        'Not Suitable', 'Accept', 'Verified', 'Applied', 'Rejected',
+        // SEEK candidate engagement/interest labels — these are NOT locations
+        'Highly interested', 'Interested', 'Open to opportunities',
+        'Actively looking', 'Not looking', 'Open', 'Casually looking',
+        'Available', 'Unavailable',
+        // SEEK verification labels
+        'Verified credential', 'Digital ID', 'SEEK Pass',
+        // Common false positives from SEEK UI
+        'Cover Letter', 'Resume', 'Profile', 'Notes', 'Emails',
+        'Applications', 'Candidate Matches', 'Hiring in progress',
+        'Check references', 'Not Suitable', 'Shortlist',
+      ];
+      if (SEEK_LABELS.some(label => t.toLowerCase() === label.toLowerCase())) return false;
+      // Also block multi-word phrases that are clearly not locations
+      if (/\b(interested|looking|available|credential|verified|hiring|reference|suitable)\b/i.test(t)) return false;
       if (!/^[A-Za-z\s,.\-']+$/.test(t)) return false;
       return true;
     };
@@ -932,26 +948,146 @@ async function captureProfileDetails(page, candidate, network) {
   // Expected monthly salary (screening question). Profile-tab is the only
   // source of truth — we do NOT fall back to the résumé tab. When no salary
   // label is found we explicitly persist `null` so the ATS won't re-poll.
-  const rawSalary = detail.expectedSalaryRaw ?? null;
-  const normalizedSalary = formatSalaryDisplay({
-    raw: rawSalary,
-    amount: detail.expectedSalary,
-    currency: detail.expectedSalaryCurrency,
-  });
+  const salaryRaw = await page.evaluate(() => {
+    // Target: find <dt> with name="Gaji bulanan yang diinginkan" (or English equivalent)
+    // Then get the adjacent <dd> value
 
-  console.log(`      [SALARY RAW] ${rawSalary === null ? "null" : JSON.stringify(rawSalary)}`);
-  console.log(
-    `      [SALARY NORMALIZED] ${normalizedSalary === null ? "null" : JSON.stringify(normalizedSalary)}`,
-  );
+    // Method 1: find by dt[name] attribute — most reliable
+    const salaryLabels = [
+      'Gaji bulanan yang diinginkan',
+      'Expected monthly salary',
+      'Gaji yang diinginkan',
+      'Gaji bulanan'
+    ];
 
-  candidate.expectedSalaryRaw = rawSalary;
-  candidate.expectedSalary = detail.expectedSalary ?? null;
-  candidate.expectedSalaryCurrency = detail.expectedSalaryCurrency ?? null;
-  candidate.salaryExpectation = normalizedSalary;
-  candidate.salarySource = normalizedSalary ? "profile-tab" : null;
+    // Try dt with name attribute
+    for (const label of salaryLabels) {
+      const dt = document.querySelector(`dt div[name="${label}"], dt[name="${label}"]`);
+      if (dt) {
+        // Get parent <dt>, then its next sibling <dd>
+        const dtEl = dt.closest('dt');
+        if (dtEl) {
+          const dd = dtEl.nextElementSibling;
+          if (dd && dd.tagName === 'DD') {
+            const val = dd.textContent?.trim();
+            if (val && val !== '—' && val !== '-' && val !== '') return val;
+            if (val === '—' || val === '-') return null; // explicitly empty
+          }
+        }
+      }
+    }
 
-  if (normalizedSalary) {
-    console.log(`      💰 ${normalizedSalary}`);
+    // Method 2: find by label text content inside dt, then get sibling dd
+    const allDts = document.querySelectorAll('dt');
+    for (const dt of allDts) {
+      const text = dt.textContent?.trim();
+      if (!text) continue;
+      const isMatch = salaryLabels.some(label => text.includes(label));
+      if (!isMatch) continue;
+
+      const dd = dt.nextElementSibling;
+      if (dd && dd.tagName === 'DD') {
+        const val = dd.textContent?.trim();
+        // CRITICAL: reject any value that looks like JSON or config data
+        if (val && val.startsWith('{')) return null;
+        if (val && val.startsWith('[')) return null;
+        if (val && val.includes('config')) return null;
+        if (val && val.includes('environment')) return null;
+        if (val && val !== '—' && val !== '-' && val !== '') return val;
+      }
+    }
+
+    // Method 3: find "Gaji bulanan yang diinginkan" text node,
+    // then walk up to find the dl row structure
+    const allSpans = document.querySelectorAll('span, p, div');
+    for (const el of allSpans) {
+      // Must be a near-leaf node with just the label text
+      if (el.children.length > 2) continue;
+      const text = el.textContent?.trim();
+      if (!salaryLabels.some(label => text === label)) continue;
+
+      // Found label — walk up to find the row container, then find value sibling
+      let row = el.parentElement;
+      for (let i = 0; i < 4; i++) {
+        if (!row) break;
+        // Look for a sibling that has salary value
+        const siblings = row.parentElement?.children;
+        if (siblings) {
+          let foundCurrent = false;
+          for (const sib of siblings) {
+            if (sib === row) { foundCurrent = true; continue; }
+            if (!foundCurrent) continue;
+            const val = sib.textContent?.trim();
+            // Reject JSON/config garbage
+            if (!val || val.startsWith('{') || val.includes('environment')) {
+              break; // wrong area, stop
+            }
+            // Must look like a salary: Rp prefix, or dash, or number
+            if (/^(Rp|—|-|[\d])/.test(val) && val.length < 30) {
+              if (val === '—' || val === '-') return null;
+              return val;
+            }
+          }
+        }
+        row = row.parentElement;
+      }
+    }
+
+    return null;
+  }).catch(() => null);
+
+  // HARD SAFETY CHECK: if the value is JSON config, discard it
+  const isGarbage = (v) => !v || v.startsWith('{') || v.startsWith('[') ||
+                            v.includes('environment') || v.includes('config') ||
+                            v.includes('employer-seek');
+  const cleanSalaryRaw = isGarbage(salaryRaw) ? null : salaryRaw;
+
+  console.log(`      [SALARY RAW] ${cleanSalaryRaw}`);
+
+  // Normalize to full Rupiah integer
+  let salaryNormalized = null;
+  if (cleanSalaryRaw) {
+    const s = cleanSalaryRaw.trim();
+
+    // Pattern: "Rp 5.5 Jt", "Rp5.5Jt", "Rp 5,5 Jt"
+    const jutaMatch = s.match(/Rp\s*([\d.,]+)\s*Jt/i) || s.match(/Rp\s*([\d.,]+)\s*Juta/i);
+    if (jutaMatch) {
+      const num = parseFloat(jutaMatch[1].replace(',', '.'));
+      if (!isNaN(num)) salaryNormalized = Math.round(num * 1_000_000);
+    }
+
+    // Pattern: "Rp 5.000.000" or "Rp5000000"
+    if (!salaryNormalized) {
+      const fullMatch = s.match(/Rp\s*([\d.]+)/i);
+      if (fullMatch) {
+        const num = parseInt(fullMatch[1].replace(/\./g, ''));
+        if (!isNaN(num) && num > 1000) salaryNormalized = num;
+      }
+    }
+
+    // Pattern: "Rp 500 Rb" or "Rp 500 Ribu"
+    if (!salaryNormalized) {
+      const ribuMatch = s.match(/Rp\s*([\d.,]+)\s*(Rb|Ribu|K)/i);
+      if (ribuMatch) {
+        const num = parseFloat(ribuMatch[1].replace(',', '.'));
+        if (!isNaN(num)) salaryNormalized = Math.round(num * 1_000);
+      }
+    }
+  }
+
+  console.log(`      [SALARY NORMALIZED] ${salaryNormalized}`);
+
+  const salaryFinal = salaryNormalized || null;
+  console.log(`      [SALARY FINAL] ${salaryFinal === null ? "null" : JSON.stringify(salaryFinal)}`);
+
+  candidate.expectedSalaryRaw = cleanSalaryRaw;
+  candidate.expectedSalary = salaryFinal;
+  candidate.expectedSalaryCurrency = salaryFinal ? "IDR" : null;
+  candidate.salaryExpectation = salaryFinal ? `IDR ${salaryFinal.toLocaleString('id-ID')} / month` : null;
+  candidate.salarySource = salaryFinal ? "profile-tab" : null;
+
+  if (salaryFinal) {
+    console.log(`      💰 IDR ${salaryFinal.toLocaleString('id-ID')} / month`);
   }
 
   // Drain network AFTER DOM extraction — only use API data to fill gaps
