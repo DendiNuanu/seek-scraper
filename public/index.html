@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SEEK Scraper UI</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2rem 1rem;
+  }
+  .container { width: 100%; max-width: 780px; }
+
+  h1 {
+    font-size: 1.6rem;
+    font-weight: 700;
+    text-align: center;
+    margin-bottom: 0.25rem;
+    color: #f1f5f9;
+  }
+  .subtitle {
+    text-align: center;
+    color: #94a3b8;
+    font-size: 0.85rem;
+    margin-bottom: 1.75rem;
+  }
+
+  /* ── Status bar ── */
+  .status-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 0.75rem 1.25rem;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+  }
+  .status-dot {
+    width: 12px; height: 12px; border-radius: 50%;
+    background: #475569; /* idle */
+    flex-shrink: 0;
+  }
+  .status-dot.running { background: #facc15; animation: pulse 1s infinite; }
+  .status-dot.done    { background: #22c55e; }
+  .status-dot.error   { background: #ef4444; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.35; }
+  }
+
+  .status-text      { font-weight: 600; font-size: 0.95rem; }
+  .status-text.idle  { color: #94a3b8; }
+  .status-text.run   { color: #facc15; }
+  .status-text.done  { color: #22c55e; }
+  .status-text.error { color: #ef4444; }
+
+  .timer {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    font-size: 1rem;
+    color: #cbd5e1;
+  }
+  .completion-time {
+    font-size: 0.85rem;
+    color: #94a3b8;
+    margin-left: 0.5rem;
+  }
+  .estimate {
+    font-size: 0.8rem;
+    color: #64748b;
+    margin-left: 0.5rem;
+  }
+
+  /* ── Main button ── */
+  .btn-run {
+    display: block;
+    width: 100%;
+    padding: 1.25rem;
+    font-size: 1.2rem;
+    font-weight: 700;
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+    background: linear-gradient(135deg, #6d28d9, #7c3aed);
+    color: #fff;
+    transition: background 0.2s, transform 0.1s, opacity 0.2s;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 4px 20px rgba(124,58,237,0.3);
+  }
+  .btn-run:hover:not(:disabled) {
+    background: linear-gradient(135deg, #7c3aed, #8b5cf6);
+    transform: translateY(-1px);
+  }
+  .btn-run:active:not(:disabled) { transform: translateY(0); }
+  .btn-run:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  /* ── Log area ── */
+  .log-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+  }
+  .log-header span { font-weight: 600; font-size: 0.9rem; color: #64748b; }
+  .btn-clear {
+    background: none;
+    border: 1px solid #334155;
+    color: #94a3b8;
+    padding: 0.25rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    cursor: pointer;
+  }
+  .btn-clear:hover { background: #1e293b; color: #e2e8f0; }
+
+  .log-box {
+    width: 100%;
+    height: 380px;
+    background: #020617;
+    border: 1px solid #1e293b;
+    border-radius: 10px;
+    padding: 0.75rem 1rem;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.8rem;
+    line-height: 1.6;
+    color: #cbd5e1;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin-bottom: 1.5rem;
+  }
+  .log-box .stderr { color: #f87171; }
+
+  /* ── Summary card ── */
+  .summary {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 1.25rem;
+    display: none;
+  }
+  .summary.visible { display: block; }
+  .summary h2 {
+    font-size: 1rem;
+    font-weight: 700;
+    margin-bottom: 0.75rem;
+    color: #f1f5f9;
+  }
+  .summary-stats {
+    display: flex;
+    gap: 2rem;
+  }
+  .summary-stat {
+    display: flex;
+    flex-direction: column;
+  }
+  .summary-stat .value {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: #7c3aed;
+  }
+  .summary-stat .label {
+    font-size: 0.8rem;
+    color: #64748b;
+  }
+
+  /* ── Responsive tweaks ── */
+  @media (max-width: 500px) {
+    body { padding: 1rem 0.5rem; }
+    .summary-stats { gap: 1.25rem; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <h1>🔎 SEEK Scraper</h1>
+  <p class="subtitle">Turbo list → Turbo enrich pipeline</p>
+
+  <!-- Status bar -->
+  <div class="status-bar">
+    <div class="status-dot" id="statusDot"></div>
+    <span class="status-text idle" id="statusText">Idle</span>
+    <span class="estimate" id="estimate">Estimated: 10‑20 minutes</span>
+    <span class="timer" id="timerDisplay">00:00</span>
+    <span class="completion-time" id="completionTime"></span>
+  </div>
+
+  <!-- Main button -->
+  <button class="btn-run" id="btnRun">🔍 Get Data from SEEK</button>
+
+  <!-- Log -->
+  <div class="log-header">
+    <span>📋 Process Log</span>
+    <button class="btn-clear" id="btnClear">Clear</button>
+  </div>
+  <pre class="log-box" id="logBox"></pre>
+
+  <!-- Summary -->
+  <div class="summary" id="summary">
+    <h2>📊 Scrape Results</h2>
+    <div class="summary-stats">
+      <div class="summary-stat">
+        <span class="value" id="sumTotal">—</span>
+        <span class="label">Total candidates</span>
+      </div>
+      <div class="summary-stat">
+        <span class="value" id="sumEnriched">—</span>
+        <span class="label">With email (enriched)</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ─── DOM refs ───
+const btnRun         = document.getElementById("btnRun");
+const statusDot      = document.getElementById("statusDot");
+const statusText     = document.getElementById("statusText");
+const timerDisplay   = document.getElementById("timerDisplay");
+const completionTime = document.getElementById("completionTime");
+const estimate       = document.getElementById("estimate");
+const logBox         = document.getElementById("logBox");
+const btnClear       = document.getElementById("btnClear");
+const summary        = document.getElementById("summary");
+const sumTotal       = document.getElementById("sumTotal");
+const sumEnriched    = document.getElementById("sumEnriched");
+
+// ─── Timer state ───
+let timerInterval = null;
+let startTime = null;
+
+function formatTimer(ms) {
+  const totalSec = Math.floor(ms / 1000);
+  const min = String(Math.floor(totalSec / 60)).padStart(2, "0");
+  const sec = String(totalSec % 60).padStart(2, "0");
+  return `${min}:${sec}`;
+}
+
+function startTimer() {
+  stopTimer();
+  startTime = Date.now();
+  timerDisplay.textContent = "00:00";
+  timerInterval = setInterval(() => {
+    timerDisplay.textContent = formatTimer(Date.now() - startTime);
+  }, 250);
+}
+
+function stopTimer() {
+  if (timerInterval) {
+    clearInterval(timerInterval);
+    timerInterval = null;
+  }
+}
+
+// ─── UI helpers ───
+function setStatus(state) {
+  // Remove all modifiers
+  statusDot.className = "status-dot";
+  statusText.className = "status-text";
+  completionTime.textContent = "";
+
+  switch (state) {
+    case "idle":
+      statusText.textContent = "Idle";
+      statusText.classList.add("idle");
+      estimate.style.display = "";
+      btnRun.disabled = false;
+      break;
+    case "list":
+      statusDot.classList.add("running");
+      statusText.textContent = "Running: Fetching list...";
+      statusText.classList.add("run");
+      estimate.style.display = "none";
+      btnRun.disabled = true;
+      break;
+    case "enrich":
+      statusDot.classList.add("running");
+      statusText.textContent = "Running: Enriching profiles...";
+      statusText.classList.add("run");
+      btnRun.disabled = true;
+      break;
+    case "done":
+      statusDot.classList.add("done");
+      statusText.textContent = "Done ✅";
+      statusText.classList.add("done");
+      btnRun.disabled = false;
+      stopTimer();
+      break;
+    case "error":
+      statusDot.classList.add("error");
+      statusText.textContent = "Error ❌";
+      statusText.classList.add("error");
+      btnRun.disabled = false;
+      stopTimer();
+      break;
+  }
+}
+
+function appendLog(text, stream) {
+  const span = document.createElement("span");
+  if (stream === "stderr") span.className = "stderr";
+  span.textContent = text;
+  logBox.appendChild(span);
+  logBox.scrollTop = logBox.scrollHeight;
+}
+
+async function fetchSummary() {
+  try {
+    const resp = await fetch("/api/summary");
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    sumTotal.textContent = data.total ?? "—";
+    sumEnriched.textContent = data.enriched ?? "—";
+    summary.classList.add("visible");
+  } catch (err) {
+    console.error("Failed to fetch summary:", err);
+    appendLog(`[client] Could not load summary: ${err.message}\n`, "stderr");
+  }
+}
+
+// ─── SSE run ───
+btnRun.addEventListener("click", () => {
+  // Reset UI
+  logBox.innerHTML = "";
+  summary.classList.remove("visible");
+  completionTime.textContent = "";
+  setStatus("list");
+  startTimer();
+
+  const es = new EventSource("/api/run");
+
+  es.addEventListener("status", (e) => {
+    const data = JSON.parse(e.data);
+    appendLog(`[status] ${data.label}\n`, "stdout");
+    if (data.phase === "turbo-list") setStatus("list");
+    else if (data.phase === "turbo-enrich") setStatus("enrich");
+    else if (data.phase === "done") {
+      setStatus("done");
+      if (data.completionWita) completionTime.textContent = data.completionWita;
+      fetchSummary();
+    } else if (data.phase === "error") {
+      setStatus("error");
+    }
+  });
+
+  es.addEventListener("log", (e) => {
+    const data = JSON.parse(e.data);
+    appendLog(data.text, data.stream);
+  });
+
+  es.addEventListener("done", (e) => {
+    const data = JSON.parse(e.data);
+    if (data.completionWita) completionTime.textContent = data.completionWita;
+  });
+
+  es.addEventListener("error", (e) => {
+    appendLog(`[client] SSE connection error\n`, "stderr");
+    setStatus("error");
+  });
+
+  // If the server returns a non-200 (e.g. 409 busy), EventSource fires
+  // its onerror. We also peek at the response. However EventSource doesn't
+  // expose the response body. Let's do a quick pre-flight check.
+  // Actually, we handle this by checking the SSE stream – if the first
+  // message is an error-type status, we react accordingly.
+  // For 409, EventSource won't connect; we fall through to the error handler.
+  es.onerror = () => {
+    // Could be a 409 or connection close. If we haven't received any status
+    // after a short delay, treat as busy.
+    setTimeout(() => {
+      if (statusText.textContent === "Running: Fetching list...") {
+        // No status received → likely 409
+        appendLog("[client] Server is busy — another run may be in progress.\n", "stderr");
+        setStatus("error");
+      }
+    }, 500);
+    es.close();
+  };
+});
+
+// ─── Clear log ───
+btnClear.addEventListener("click", () => {
+  logBox.innerHTML = "";
+});
+
+// ─── Initial: fetch summary so returning users see last results ───
+fetchSummary();
+</script>
+</body>
+</html>

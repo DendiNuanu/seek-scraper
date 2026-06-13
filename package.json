@@ -16,12 +16,14 @@
     "resume-turbo": "TURBO_MODE=true START_PAGE=33 MAX_PAGES=40 MAX_AGE_MONTHS=6 PARALLEL_LIST_PAGES=3 FETCH_CONTACT_DETAILS=false RESUME_CHECKPOINT=true SCRAPE_ONLY=true HEADLESS=false node scraper.js",
     "turbo-enrich": "TURBO_ENRICH=true ENRICH_CONCURRENCY=4 HEADLESS=false node scraper.js",
     "turbo-enrich-full": "TURBO_ENRICH=true ENRICH_CONCURRENCY=4 HEADLESS=false node scraper.js",
+    "ui": "node server.js",
     "turbo-full": "TURBO_MODE=true MAX_PAGES=13 MAX_AGE_DAYS=5 PARALLEL_LIST_PAGES=3 FETCH_CONTACT_DETAILS=false SCRAPE_ONLY=true HEADLESS=false node scraper.js && TURBO_ENRICH=true ENRICH_CONCURRENCY=4 HEADLESS=false node scraper.js",
     "setup": "npx playwright install chromium",
     "test-api": "node test-api.js",
     "test-env": "node -e \"import 'dotenv/config'; const p=process.env.SEEK_PASSWORD; console.log('length:', p?.length); console.log('endsWith#:', p?.endsWith('#'));\""
   },
   "dependencies": {
+    "express": "^4.21.0",
     "playwright": "^1.44.0",
     "dotenv": "^16.4.5"
   }
