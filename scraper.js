@@ -20,7 +20,12 @@ import {
   extractJobIdsFromPageHtml,
   extractYourCandidatesFromDom,
   formatSalaryDisplay,
-    mergeApiFieldsIntoCandidate,
+  mergeApiFieldsIntoCandidate,
+  extractCareerHistoryFromDetail,
+  extractEducationFromDetail,
+  extractLicencesAndCertificationsFromDetail,
+  extractApplicationQuestionsFromDetail,
+  extractSkillsFromDetail,
 } from "./seek-extract.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1090,6 +1095,54 @@ async function captureProfileDetails(page, candidate, network) {
     console.log(`      💰 IDR ${salaryFinal.toLocaleString('id-ID')} / month`);
   }
 
+  // ── Extract 5 additional detail sections from the candidate profile ──
+  // Each call runs page.evaluate and returns an array (empty if section missing).
+
+  try {
+    const careerHistory = await page.evaluate(extractCareerHistoryFromDetail).catch(() => []);
+    candidate.careerHistory = careerHistory || [];
+    console.log(`      📋 Career history: ${candidate.careerHistory.length} entries`);
+  } catch (err) {
+    candidate.careerHistory = [];
+    console.log(`      ⚠️ Career history extraction failed: ${err.message}`);
+  }
+
+  try {
+    const education = await page.evaluate(extractEducationFromDetail).catch(() => []);
+    candidate.education = education || [];
+    console.log(`      🎓 Education: ${candidate.education.length} entries`);
+  } catch (err) {
+    candidate.education = [];
+    console.log(`      ⚠️ Education extraction failed: ${err.message}`);
+  }
+
+  try {
+    const licences = await page.evaluate(extractLicencesAndCertificationsFromDetail).catch(() => []);
+    candidate.licencesAndCertifications = licences || [];
+    console.log(`      📜 Licences & certifications: ${candidate.licencesAndCertifications.length} entries`);
+  } catch (err) {
+    candidate.licencesAndCertifications = [];
+    console.log(`      ⚠️ Licences extraction failed: ${err.message}`);
+  }
+
+  try {
+    const appQuestions = await page.evaluate(extractApplicationQuestionsFromDetail).catch(() => []);
+    candidate.applicationQuestions = appQuestions || [];
+    console.log(`      ❓ Application questions: ${candidate.applicationQuestions.length} pairs`);
+  } catch (err) {
+    candidate.applicationQuestions = [];
+    console.log(`      ⚠️ Application questions extraction failed: ${err.message}`);
+  }
+
+  try {
+    const skills = await page.evaluate(extractSkillsFromDetail).catch(() => []);
+    candidate.skills = skills || [];
+    console.log(`      🏷️  Skills: ${candidate.skills.length} tags`);
+  } catch (err) {
+    candidate.skills = [];
+    console.log(`      ⚠️ Skills extraction failed: ${err.message}`);
+  }
+
   // Drain network AFTER DOM extraction — only use API data to fill gaps
   if (network) drainNetworkCandidatesInto(network, candidate);
 
@@ -1928,6 +1981,11 @@ function buildApiCandidatePayload(c, { includeResume = true } = {}) {
     // FIX: salary fields — set by captureProfileDetails() from SEEK profile tab
     expectedSalaryRaw: c.expectedSalaryRaw || null,
     salaryExpectation: c.salaryExpectation || null,
+    careerHistory: c.careerHistory || [],
+    education: c.education || [],
+    licencesAndCertifications: c.licencesAndCertifications || [],
+    applicationQuestions: c.applicationQuestions || [],
+    skills: c.skills || [],
   };
 
   if (includeResume && c.resumeLocalPath && fs.existsSync(c.resumeLocalPath)) {

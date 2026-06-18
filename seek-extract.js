@@ -1452,3 +1452,864 @@ export function extractCandidateCardsFromDom(jobTitle) {
 
   return results;
 }
+
+// =========================================================================
+// SECTION-BASED DETAIL EXTRACTIONS (Career history, Education, Licences,
+// Application questions, Skills)
+// =========================================================================
+// Each function runs in the browser via page.evaluate — must be
+// self-contained.  They locate a section by its visible heading text
+// (case-insensitive), then parse the structured content that follows.
+// Returns an empty array (never null/undefined) when the section is absent.
+
+/**
+ * Extract "Career history" section from the candidate detail panel.
+ * Returns an array of { title, company, dates, description } objects.
+ */
+export function extractCareerHistoryFromDetail() {
+  /**
+   * Locate the root panel that contains the candidate detail sections.
+   * Mirrors findPanelRoot() logic from extractCandidateDetailFromModal.
+   */
+  function findDetailPanel() {
+    var allLinks = Array.from(document.querySelectorAll('a[href^="mailto:"]'));
+    for (var li = 0; li < allLinks.length; li++) {
+      var link = allLinks[li];
+      var el = link.parentElement;
+      for (var depth = 0; depth < 12 && el && el !== document.body; depth++) {
+        var hasTabs = el.querySelector('[role="tab"], [role="tablist"], nav a') !== null;
+        var hasName = el.querySelector("h1, h2") !== null;
+        if (hasTabs && hasName) return el;
+        el = el.parentElement;
+      }
+    }
+    var asides = Array.from(document.querySelectorAll("aside"));
+    for (var ai = 0; ai < asides.length; ai++) {
+      var a = asides[ai];
+      if (a.querySelector('[role="tab"], [role="tablist"]') && a.querySelector("h1, h2")) {
+        return a;
+      }
+    }
+    var allDivs = Array.from(document.querySelectorAll("section, div, article"));
+    for (var di = 0; di < allDivs.length; di++) {
+      var el2 = allDivs[di];
+      var txt = (el2.innerText || "").toLowerCase();
+      if (txt.indexOf("career history") >= 0 && txt.indexOf("education") >= 0) {
+        return el2;
+      }
+    }
+    return document.body;
+  }
+
+  var root = findDetailPanel();
+  var results = [];
+
+  var headings = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b, dt, div, span, p"));
+  var careerHeading = null;
+  for (var hi = 0; hi < headings.length; hi++) {
+    var h = headings[hi];
+    var t = (h.textContent || "").trim();
+    if (t.toLowerCase() === "career history" || t.toLowerCase() === "riwayat pekerjaan") {
+      if (!careerHeading || h.textContent.length < careerHeading.textContent.length) {
+        careerHeading = h;
+      }
+    }
+  }
+  if (!careerHeading) return results;
+
+  var container = careerHeading.parentElement;
+  for (var d = 0; d < 4 && container; d++) {
+    if (container.children.length >= 2) break;
+    container = container.parentElement;
+  }
+  if (!container) return results;
+
+  var dateRangePattern = /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s*[-–—]\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Current|Present|Sekarang|Now|Saat ini)\s*\d{0,4}/i;
+  var yearRangePattern = /\d{4}\s*[-–—]\s*(\d{4}|Current|Present|Sekarang|Now|Saat ini)/i;
+  var nextSectionHeadings = ["education", "pendidikan", "licences", "licenses", "sertifikasi", "application questions", "skills", "keahlian"];
+
+  var allElements = Array.from(container.querySelectorAll("div, section, article, li"));
+  var foundCareerSection = false;
+
+  for (var ei = 0; ei < allElements.length; ei++) {
+    var el = allElements[ei];
+    var txt = (el.textContent || "").trim();
+    var lower = txt.toLowerCase();
+
+    var isNextHeading = false;
+    for (var ni = 0; ni < nextSectionHeadings.length; ni++) {
+      if (lower === nextSectionHeadings[ni]) { isNextHeading = true; break; }
+    }
+    if (isNextHeading) {
+      if (foundCareerSection) break;
+      continue;
+    }
+    if (el === careerHeading || el.contains(careerHeading)) {
+      foundCareerSection = true;
+      continue;
+    }
+    if (!foundCareerSection) continue;
+    if (!txt || txt.length < 5) continue;
+    if (!dateRangePattern.test(txt) && !yearRangePattern.test(txt)) continue;
+
+    var lines = txt.split("\n").map(function(s) { return s.trim(); }).filter(Boolean);
+    if (lines.length < 2) continue;
+
+    var titleEl = el.querySelector("h3, h4, h5, h6, strong, b, [data-automation*='title'], [data-automation*='position']");
+    var title = titleEl ? (titleEl.textContent || "").trim() : (lines[0] || "");
+    var company = "";
+    var dates = "";
+    var description = "";
+
+    for (var li2 = 0; li2 < lines.length; li2++) {
+      var line = lines[li2];
+      if (line === title) continue;
+      if (dateRangePattern.test(line) || yearRangePattern.test(line)) {
+        dates = line;
+      } else if (/\b(PT|CV|UD|Ltd|Inc|Corp|Perusahaan|Company|Group|Firm|Consulting|Services|Solutions)\b/i.test(line) ||
+                 (line.length > 3 && line.length < 80 && !dates && !company && line !== title)) {
+        if (!company) company = line;
+      }
+    }
+
+    if (!company && lines.length >= 2) {
+      for (var li3 = 0; li3 < lines.length; li3++) {
+        var l2 = lines[li3];
+        if (l2 !== title && !dateRangePattern.test(l2) && !yearRangePattern.test(l2)) {
+          company = l2;
+          break;
+        }
+      }
+    }
+
+    var knownLines = {};
+    knownLines[title] = true;
+    knownLines[company] = true;
+    knownLines[dates] = true;
+    var descLines = [];
+    for (var li4 = 0; li4 < lines.length; li4++) {
+      var l3 = lines[li4];
+      if (!knownLines[l3] && l3.length > 10) descLines.push(l3);
+    }
+    description = descLines.join(" ") || null;
+
+    if (title) {
+      results.push({
+        title: title,
+        company: company || null,
+        dates: dates || null,
+        description: description
+      });
+    }
+  }
+
+  if (results.length === 0) {
+    var allText = (root.innerText || "").split("\n").map(function(s) { return s.trim(); });
+    var inCareer = false;
+    var currentEntry = null;
+
+    for (var ti = 0; ti < allText.length; ti++) {
+      var line = allText[ti];
+      var lower2 = line.toLowerCase();
+      if (lower2 === "career history" || lower2 === "riwayat pekerjaan") {
+        inCareer = true;
+        continue;
+      }
+      if (!inCareer) continue;
+      var isNext2 = false;
+      for (var nj = 0; nj < nextSectionHeadings.length; nj++) {
+        if (lower2 === nextSectionHeadings[nj]) { isNext2 = true; break; }
+      }
+      if (isNext2) break;
+      if (!line) continue;
+
+      if (dateRangePattern.test(line) || yearRangePattern.test(line)) {
+        if (currentEntry && currentEntry.title) results.push(currentEntry);
+        currentEntry = { title: "", company: null, dates: line, description: null };
+        if (ti > 0 && allText[ti - 1]) currentEntry.company = allText[ti - 1];
+        if (ti > 1 && allText[ti - 2]) currentEntry.title = allText[ti - 2];
+        continue;
+      }
+      if (currentEntry && line.length > 10) {
+        currentEntry.description = currentEntry.description ? currentEntry.description + " " + line : line;
+      }
+    }
+    if (currentEntry && currentEntry.title) results.push(currentEntry);
+  }
+
+  return results;
+}
+
+/**
+ * Extract "Education" section from the candidate detail panel.
+ * Returns an array of { degree, institution, status, description } objects.
+ */
+export function extractEducationFromDetail() {
+  function findDetailPanel() {
+    var allLinks = Array.from(document.querySelectorAll('a[href^="mailto:"]'));
+    for (var li = 0; li < allLinks.length; li++) {
+      var link = allLinks[li];
+      var el = link.parentElement;
+      for (var depth = 0; depth < 12 && el && el !== document.body; depth++) {
+        var hasTabs = el.querySelector('[role="tab"], [role="tablist"], nav a') !== null;
+        var hasName = el.querySelector("h1, h2") !== null;
+        if (hasTabs && hasName) return el;
+        el = el.parentElement;
+      }
+    }
+    var asides = Array.from(document.querySelectorAll("aside"));
+    for (var ai = 0; ai < asides.length; ai++) {
+      var a = asides[ai];
+      if (a.querySelector('[role="tab"], [role="tablist"]') && a.querySelector("h1, h2")) {
+        return a;
+      }
+    }
+    var allDivs = Array.from(document.querySelectorAll("section, div, article"));
+    for (var di = 0; di < allDivs.length; di++) {
+      var el2 = allDivs[di];
+      var txt = (el2.innerText || "").toLowerCase();
+      if (txt.indexOf("education") >= 0 && (txt.indexOf("career history") >= 0 || txt.indexOf("licences") >= 0)) {
+        return el2;
+      }
+    }
+    return document.body;
+  }
+
+  var root = findDetailPanel();
+  var results = [];
+
+  var headings = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b, dt, div, span, p"));
+  var eduHeading = null;
+  for (var hi = 0; hi < headings.length; hi++) {
+    var h = headings[hi];
+    var t = (h.textContent || "").trim();
+    if (t.toLowerCase() === "education" || t.toLowerCase() === "pendidikan") {
+      if (!eduHeading || h.textContent.length < eduHeading.textContent.length) {
+        eduHeading = h;
+      }
+    }
+  }
+  if (!eduHeading) return results;
+
+  var container = eduHeading.parentElement;
+  for (var d = 0; d < 4 && container; d++) {
+    if (container.children.length >= 2) break;
+    container = container.parentElement;
+  }
+  if (!container) return results;
+
+  var dateRangePattern = /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s*[-–—]\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Current|Present|Sekarang|Now|Saat ini)\s*\d{0,4}/i;
+  var yearPattern = /\d{4}/;
+  var finishedPattern = /(Finished|Lulus|Graduated|Completed|Selesai)\s*\d{4}/i;
+  var nextSectionHeadings = ["licences", "licenses", "sertifikasi", "certifications", "application questions", "skills", "keahlian", "career history"];
+
+  var allElements = Array.from(container.querySelectorAll("div, section, article, li"));
+  var foundEduSection = false;
+
+  for (var ei = 0; ei < allElements.length; ei++) {
+    var el = allElements[ei];
+    var txt = (el.textContent || "").trim();
+    var lower = txt.toLowerCase();
+
+    var isNextHeading = false;
+    for (var ni = 0; ni < nextSectionHeadings.length; ni++) {
+      if (lower === nextSectionHeadings[ni]) { isNextHeading = true; break; }
+    }
+    if (isNextHeading) {
+      if (foundEduSection) break;
+      continue;
+    }
+    if (el === eduHeading || el.contains(eduHeading)) {
+      foundEduSection = true;
+      continue;
+    }
+    if (!foundEduSection) continue;
+    if (!txt || txt.length < 3) continue;
+
+    var hasDegree = /sarjana|magister|bachelor|master|doctor|diploma|s\.\s*[a-z]|s1\b|s2\b|s3\b|d3\b|d4\b|sma\b|smk\b|degree|gelar/i.test(txt);
+    if (!hasDegree) continue;
+
+    var lines = txt.split("\n").map(function(s) { return s.trim(); }).filter(Boolean);
+    if (lines.length < 1) continue;
+
+    var degreeEl = el.querySelector("h3, h4, h5, h6, strong, b");
+    var degree = degreeEl ? (degreeEl.textContent || "").trim() : (lines[0] || "");
+    var institution = "";
+    var status = "";
+    var description = "";
+
+    for (var li2 = 0; li2 < lines.length; li2++) {
+      var line = lines[li2];
+      if (line === degree) continue;
+      if (finishedPattern.test(line) || dateRangePattern.test(line)) {
+        status = line;
+      } else if (yearPattern.test(line) && !status) {
+        status = line;
+      } else if (/\b(university|universitas|institut|institute|school|sekolah|politeknik|academy|akademi|college|STM|SMA|SMK)\b/i.test(line) && !institution) {
+        institution = line;
+      } else if (line.length > 10 && !institution) {
+        institution = line;
+      }
+    }
+
+    if (!institution && lines.length >= 2) {
+      for (var li3 = 0; li3 < lines.length; li3++) {
+        var l2 = lines[li3];
+        if (l2 !== degree && !finishedPattern.test(l2) && !dateRangePattern.test(l2)) {
+          institution = l2;
+          break;
+        }
+      }
+    }
+
+    var knownLines = {};
+    knownLines[degree] = true;
+    if (institution) knownLines[institution] = true;
+    if (status) knownLines[status] = true;
+    var descLines = [];
+    for (var li4 = 0; li4 < lines.length; li4++) {
+      var l3 = lines[li4];
+      if (!knownLines[l3] && l3.length > 10) descLines.push(l3);
+    }
+    description = descLines.join(" ") || null;
+
+    if (degree) {
+      results.push({
+        degree: degree,
+        institution: institution || null,
+        status: status || null,
+        description: description
+      });
+    }
+  }
+
+  if (results.length === 0) {
+    var allText = (root.innerText || "").split("\n").map(function(s) { return s.trim(); });
+    var inEdu = false;
+    var currentEntry = null;
+
+    for (var ti = 0; ti < allText.length; ti++) {
+      var line = allText[ti];
+      var lower2 = line.toLowerCase();
+      if (lower2 === "education" || lower2 === "pendidikan") {
+        inEdu = true;
+        continue;
+      }
+      if (!inEdu) continue;
+      var isNext2 = false;
+      for (var nj = 0; nj < nextSectionHeadings.length; nj++) {
+        if (lower2 === nextSectionHeadings[nj]) { isNext2 = true; break; }
+      }
+      if (isNext2) break;
+      if (!line) continue;
+
+      var hasDegree2 = /sarjana|magister|bachelor|master|doctor|diploma|s\.\s*[a-z]|s1\b|s2\b|s3\b|d3\b|d4\b/i.test(line);
+      if (hasDegree2 && !currentEntry) {
+        currentEntry = { degree: line, institution: null, status: null, description: null };
+      } else if (currentEntry) {
+        if (finishedPattern.test(line) || yearPattern.test(line)) {
+          currentEntry.status = line;
+        } else if (!currentEntry.institution && line.length > 3) {
+          currentEntry.institution = line;
+        }
+      }
+    }
+    if (currentEntry && currentEntry.degree) results.push(currentEntry);
+  }
+
+  return results;
+}
+
+/**
+ * Extract "Licences and certifications" (or "Licenses and certifications")
+ * section from the candidate detail panel.
+ * Returns an array of { name, organization, dates, description } objects.
+ */
+export function extractLicencesAndCertificationsFromDetail() {
+  function findDetailPanel() {
+    var allLinks = Array.from(document.querySelectorAll('a[href^="mailto:"]'));
+    for (var li = 0; li < allLinks.length; li++) {
+      var link = allLinks[li];
+      var el = link.parentElement;
+      for (var depth = 0; depth < 12 && el && el !== document.body; depth++) {
+        var hasTabs = el.querySelector('[role="tab"], [role="tablist"], nav a') !== null;
+        var hasName = el.querySelector("h1, h2") !== null;
+        if (hasTabs && hasName) return el;
+        el = el.parentElement;
+      }
+    }
+    var asides = Array.from(document.querySelectorAll("aside"));
+    for (var ai = 0; ai < asides.length; ai++) {
+      var a = asides[ai];
+      if (a.querySelector('[role="tab"], [role="tablist"]') && a.querySelector("h1, h2")) {
+        return a;
+      }
+    }
+    var allDivs = Array.from(document.querySelectorAll("section, div, article"));
+    for (var di = 0; di < allDivs.length; di++) {
+      var el2 = allDivs[di];
+      var txt = (el2.innerText || "").toLowerCase();
+      if ((txt.indexOf("licences") >= 0 || txt.indexOf("licenses") >= 0) && txt.indexOf("certifications") >= 0) {
+        return el2;
+      }
+    }
+    return document.body;
+  }
+
+  var root = findDetailPanel();
+  var results = [];
+
+  var headings = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b, dt, div, span, p"));
+  var licHeading = null;
+  for (var hi = 0; hi < headings.length; hi++) {
+    var h = headings[hi];
+    var t = (h.textContent || "").trim();
+    var lower = t.toLowerCase();
+    if ((lower.indexOf("licences") >= 0 || lower.indexOf("licenses") >= 0) && lower.indexOf("certifications") >= 0) {
+      if (!licHeading || h.textContent.length < licHeading.textContent.length) {
+        licHeading = h;
+      }
+    }
+    if (lower === "lisensi dan sertifikasi" || lower === "lisensi & sertifikasi" || lower === "sertifikasi dan lisensi") {
+      if (!licHeading || h.textContent.length < licHeading.textContent.length) {
+        licHeading = h;
+      }
+    }
+  }
+  if (!licHeading) return results;
+
+  var container = licHeading.parentElement;
+  for (var d = 0; d < 4 && container; d++) {
+    if (container.children.length >= 2) break;
+    container = container.parentElement;
+  }
+  if (!container) return results;
+
+  var dateRangePattern = /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s*[-–—]\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Current|Present|Sekarang|Now|Saat ini)\s*\d{0,4}/i;
+  var yearRangePattern = /\d{4}\s*[-–—]\s*(\d{4}|Current|Present|Sekarang|Now|Saat ini)/i;
+  var nextSectionHeadings = ["application questions", "pertanyaan penyaringan", "skills", "keahlian", "education", "pendidikan"];
+
+  var allElements = Array.from(container.querySelectorAll("div, section, article, li"));
+  var foundLicSection = false;
+
+  for (var ei = 0; ei < allElements.length; ei++) {
+    var el = allElements[ei];
+    var txt = (el.textContent || "").trim();
+    var lower = txt.toLowerCase();
+
+    var isNextHeading = false;
+    for (var ni = 0; ni < nextSectionHeadings.length; ni++) {
+      if (lower === nextSectionHeadings[ni]) { isNextHeading = true; break; }
+    }
+    if (isNextHeading) {
+      if (foundLicSection) break;
+      continue;
+    }
+    if (el === licHeading || el.contains(licHeading)) {
+      foundLicSection = true;
+      continue;
+    }
+    if (!foundLicSection) continue;
+    if (!txt || txt.length < 3) continue;
+
+    var hasDate = dateRangePattern.test(txt) || yearRangePattern.test(txt);
+    if (!hasDate && txt.length < 8) continue;
+
+    var lines = txt.split("\n").map(function(s) { return s.trim(); }).filter(Boolean);
+    if (lines.length < 1) continue;
+
+    var nameEl = el.querySelector("h3, h4, h5, h6, strong, b");
+    var name = nameEl ? (nameEl.textContent || "").trim() : (lines[0] || "");
+    var organization = "";
+    var dates = "";
+    var description = "";
+
+    for (var li2 = 0; li2 < lines.length; li2++) {
+      var line = lines[li2];
+      if (line === name) continue;
+      if (dateRangePattern.test(line) || yearRangePattern.test(line)) {
+        dates = line;
+      } else if (line.length > 3 && line.length < 80 && !dates && !organization) {
+        organization = line;
+      }
+    }
+
+    var knownLines = {};
+    knownLines[name] = true;
+    if (organization) knownLines[organization] = true;
+    if (dates) knownLines[dates] = true;
+    var descLines = [];
+    for (var li3 = 0; li3 < lines.length; li3++) {
+      var l2 = lines[li3];
+      if (!knownLines[l2] && l2.length > 10) descLines.push(l2);
+    }
+    description = descLines.join(" ") || null;
+
+    if (name) {
+      results.push({
+        name: name,
+        organization: organization || null,
+        dates: dates || null,
+        description: description
+      });
+    }
+  }
+
+  if (results.length === 0) {
+    var allText = (root.innerText || "").split("\n").map(function(s) { return s.trim(); });
+    var inLic = false;
+    var currentEntry = null;
+
+    for (var ti = 0; ti < allText.length; ti++) {
+      var line = allText[ti];
+      var lower2 = line.toLowerCase();
+      if ((lower2.indexOf("licences") >= 0 || lower2.indexOf("licenses") >= 0) && lower2.indexOf("certifications") >= 0) {
+        inLic = true;
+        continue;
+      }
+      if (lower2 === "lisensi dan sertifikasi" || lower2 === "sertifikasi dan lisensi") {
+        inLic = true;
+        continue;
+      }
+      if (!inLic) continue;
+      var isNext2 = false;
+      for (var nj = 0; nj < nextSectionHeadings.length; nj++) {
+        if (lower2 === nextSectionHeadings[nj]) { isNext2 = true; break; }
+      }
+      if (isNext2) break;
+      if (!line) continue;
+
+      if (dateRangePattern.test(line) || yearRangePattern.test(line)) {
+        if (currentEntry && currentEntry.name) results.push(currentEntry);
+        currentEntry = { name: "", organization: null, dates: line, description: null };
+        if (ti > 0 && allText[ti - 1]) currentEntry.organization = allText[ti - 1];
+        if (ti > 1 && allText[ti - 2]) currentEntry.name = allText[ti - 2];
+        continue;
+      }
+      if (currentEntry && line.length > 10) {
+        currentEntry.description = currentEntry.description ? currentEntry.description + " " + line : line;
+      }
+    }
+    if (currentEntry && currentEntry.name) results.push(currentEntry);
+  }
+
+  return results;
+}
+
+/**
+ * Extract "Application questions" section from the candidate detail panel.
+ * Returns an array of { question, answer } objects.
+ * Questions can vary between candidates — do NOT hardcode a list.
+ */
+export function extractApplicationQuestionsFromDetail() {
+  function findDetailPanel() {
+    var allLinks = Array.from(document.querySelectorAll('a[href^="mailto:"]'));
+    for (var li = 0; li < allLinks.length; li++) {
+      var link = allLinks[li];
+      var el = link.parentElement;
+      for (var depth = 0; depth < 12 && el && el !== document.body; depth++) {
+        var hasTabs = el.querySelector('[role="tab"], [role="tablist"], nav a') !== null;
+        var hasName = el.querySelector("h1, h2") !== null;
+        if (hasTabs && hasName) return el;
+        el = el.parentElement;
+      }
+    }
+    var asides = Array.from(document.querySelectorAll("aside"));
+    for (var ai = 0; ai < asides.length; ai++) {
+      var a = asides[ai];
+      if (a.querySelector('[role="tab"], [role="tablist"]') && a.querySelector("h1, h2")) {
+        return a;
+      }
+    }
+    var allDivs = Array.from(document.querySelectorAll("section, div, article"));
+    for (var di = 0; di < allDivs.length; di++) {
+      var el2 = allDivs[di];
+      var txt = (el2.innerText || "").toLowerCase();
+      if (txt.indexOf("application questions") >= 0 || txt.indexOf("pertanyaan penyaringan") >= 0) {
+        return el2;
+      }
+    }
+    return document.body;
+  }
+
+  var root = findDetailPanel();
+  var results = [];
+
+  var headings = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b, dt, div, span, p"));
+  var aqHeading = null;
+  for (var hi = 0; hi < headings.length; hi++) {
+    var h = headings[hi];
+    var t = (h.textContent || "").trim();
+    var lower = t.toLowerCase();
+    if (lower === "application questions" || lower === "pertanyaan penyaringan" || lower === "screening questions") {
+      if (!aqHeading || h.textContent.length < aqHeading.textContent.length) {
+        aqHeading = h;
+      }
+    }
+  }
+  if (!aqHeading) return results;
+
+  var container = aqHeading.parentElement;
+  for (var d = 0; d < 5 && container; d++) {
+    if (container.children.length >= 2) break;
+    container = container.parentElement;
+  }
+  if (!container) return results;
+
+  var nextSectionHeadings = ["skills", "keahlian", "licences", "licenses", "certifications", "education", "pendidikan", "career history"];
+
+  // Strategy 1: dt/dd pairs (description list)
+  var dls = Array.from(container.querySelectorAll("dl, [data-automation*='question'], [data-automation*='screening']"));
+  for (var di = 0; di < dls.length; di++) {
+    var dl = dls[di];
+    var dts = dl.querySelectorAll("dt");
+    var dds = dl.querySelectorAll("dd");
+    for (var i = 0; i < dts.length; i++) {
+      var question = (dts[i].textContent || "").trim();
+      var answerEl = dds[i];
+      var answer = answerEl ? (answerEl.textContent || "").trim() : "";
+      if (answer === "\u2014" || answer === "-" || answer === "\u2013") answer = "";
+      if (!question) continue;
+      results.push({ question: question, answer: answer || null });
+    }
+    if (results.length > 0) break;
+  }
+
+  // Strategy 2: label/value div pairs
+  if (results.length === 0) {
+    var foundAqSection = false;
+    var allElements = Array.from(container.querySelectorAll("div, span, p, li"));
+
+    for (var ei = 0; ei < allElements.length; ei++) {
+      var el = allElements[ei];
+      var txt = (el.textContent || "").trim();
+      var lower = txt.toLowerCase();
+
+      var isNextHeading = false;
+      for (var ni = 0; ni < nextSectionHeadings.length; ni++) {
+        if (lower === nextSectionHeadings[ni]) { isNextHeading = true; break; }
+      }
+      if (isNextHeading) {
+        if (foundAqSection) break;
+        continue;
+      }
+      if (el === aqHeading || el.contains(aqHeading)) {
+        foundAqSection = true;
+        continue;
+      }
+      if (!foundAqSection) continue;
+      if (!txt || txt.length < 2) continue;
+
+      var isQuestion = txt.indexOf("?") >= 0 ||
+        /^(Gaji|Pendidikan|Pengalaman|Waktu|Kemampuan|Bahasa|Expected|Salary|Education|Experience|Notice|Language|Skill|Apakah|Berapa|Kapan|Dimana|Siapa|Bagaimana|Apa|Are you|Do you|Have you|Can you|Will you|What|How|Why|Where|When)/i.test(txt);
+
+      if (isQuestion && ei + 1 < allElements.length) {
+        var next = allElements[ei + 1];
+        var nextText = (next.textContent || "").trim();
+        var isNextHeading2 = false;
+        for (var nj = 0; nj < nextSectionHeadings.length; nj++) {
+          if (nextText.toLowerCase() === nextSectionHeadings[nj]) { isNextHeading2 = true; break; }
+        }
+        if (isNextHeading2) continue;
+        if (nextText && nextText !== "\u2014" && nextText !== "-" && nextText !== "\u2013") {
+          results.push({ question: txt, answer: nextText });
+          ei++;
+        }
+      }
+    }
+  }
+
+  // Strategy 3: text-line parsing fallback
+  if (results.length === 0) {
+    var allText = (root.innerText || "").split("\n").map(function(s) { return s.trim(); });
+    var inAq = false;
+
+    for (var ti = 0; ti < allText.length; ti++) {
+      var line = allText[ti];
+      var lower2 = line.toLowerCase();
+      if (lower2 === "application questions" || lower2 === "pertanyaan penyaringan" || lower2 === "screening questions") {
+        inAq = true;
+        continue;
+      }
+      if (!inAq) continue;
+      var isNext2 = false;
+      for (var nj = 0; nj < nextSectionHeadings.length; nj++) {
+        if (lower2 === nextSectionHeadings[nj]) { isNext2 = true; break; }
+      }
+      if (isNext2) break;
+      if (!line) continue;
+
+      var isQuestion2 = line.indexOf("?") >= 0 ||
+        /^(Gaji|Pendidikan|Pengalaman|Waktu|Kemampuan|Bahasa|Expected|Salary|Education|Experience|Notice|Language|Skill|Apakah|Berapa|Kapan|Dimana|Siapa|Bagaimana|Apa|Are you|Do you|Have you|Can you|Will you|What|How|Why|Where|When)/i.test(line);
+
+      if (isQuestion2 && ti + 1 < allText.length) {
+        var answer = allText[ti + 1];
+        var isNext3 = false;
+        for (var nk = 0; nk < nextSectionHeadings.length; nk++) {
+          if (answer.toLowerCase() === nextSectionHeadings[nk]) { isNext3 = true; break; }
+        }
+        if (answer && answer !== "\u2014" && answer !== "-" && answer !== "\u2013" && !isNext3) {
+          results.push({ question: line, answer: answer });
+          ti++;
+        }
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Extract "Skills" section from the candidate detail panel.
+ * Returns an array of skill tag strings.
+ */
+export function extractSkillsFromDetail() {
+  function findDetailPanel() {
+    var allLinks = Array.from(document.querySelectorAll('a[href^="mailto:"]'));
+    for (var li = 0; li < allLinks.length; li++) {
+      var link = allLinks[li];
+      var el = link.parentElement;
+      for (var depth = 0; depth < 12 && el && el !== document.body; depth++) {
+        var hasTabs = el.querySelector('[role="tab"], [role="tablist"], nav a') !== null;
+        var hasName = el.querySelector("h1, h2") !== null;
+        if (hasTabs && hasName) return el;
+        el = el.parentElement;
+      }
+    }
+    var asides = Array.from(document.querySelectorAll("aside"));
+    for (var ai = 0; ai < asides.length; ai++) {
+      var a = asides[ai];
+      if (a.querySelector('[role="tab"], [role="tablist"]') && a.querySelector("h1, h2")) {
+        return a;
+      }
+    }
+    var allDivs = Array.from(document.querySelectorAll("section, div, article"));
+    for (var di = 0; di < allDivs.length; di++) {
+      var el2 = allDivs[di];
+      var txt = (el2.innerText || "").toLowerCase();
+      if (txt.indexOf("skills") >= 0 || txt.indexOf("keahlian") >= 0) {
+        return el2;
+      }
+    }
+    return document.body;
+  }
+
+  var root = findDetailPanel();
+  var results = [];
+
+  var headings = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b, dt, div, span, p"));
+  var skillsHeading = null;
+  for (var hi = 0; hi < headings.length; hi++) {
+    var h = headings[hi];
+    var t = (h.textContent || "").trim();
+    var lower = t.toLowerCase();
+    if (lower === "skills" || lower === "keahlian" || lower === "keterampilan") {
+      if (!skillsHeading || h.textContent.length < skillsHeading.textContent.length) {
+        skillsHeading = h;
+      }
+    }
+  }
+  if (!skillsHeading) return results;
+
+  var container = skillsHeading.parentElement;
+  for (var d = 0; d < 5 && container; d++) {
+    if (container.children.length >= 1) break;
+    container = container.parentElement;
+  }
+  if (!container) return results;
+
+  var foundSkillsSection = false;
+  var nextSectionHeadings = ["career history", "education", "pendidikan", "licences", "licenses", "application questions", "pertanyaan penyaringan"];
+
+  var allElements = Array.from(container.querySelectorAll("span, div, li, button, a, [data-automation*='skill'], [data-automation*='tag'], [data-automation*='badge'], [data-automation*='chip']"));
+
+  for (var ei = 0; ei < allElements.length; ei++) {
+    var el = allElements[ei];
+    var txt = (el.textContent || "").trim();
+    var lower = txt.toLowerCase();
+
+    var isNextHeading = false;
+    for (var ni = 0; ni < nextSectionHeadings.length; ni++) {
+      if (lower === nextSectionHeadings[ni]) { isNextHeading = true; break; }
+    }
+    if (isNextHeading) {
+      if (foundSkillsSection) break;
+      continue;
+    }
+    if (el === skillsHeading || el.contains(skillsHeading)) {
+      foundSkillsSection = true;
+      continue;
+    }
+    if (!foundSkillsSection) continue;
+    if (!txt || txt.length < 2) continue;
+
+    if (txt.length >= 2 && txt.length <= 50 && txt.indexOf("\n") < 0 &&
+        !/^(career|education|licence|license|certification|application|screening|skill|resume|profile|verification)/i.test(txt) &&
+        !/^(riwayat|pendidikan|lisensi|sertifikasi|pertanyaan|keahlian|keterampilan)/i.test(txt)) {
+      if (results.indexOf(txt) < 0) results.push(txt);
+    }
+  }
+
+  // Strategy 2: ul/ol list items
+  if (results.length === 0) {
+    var foundSkillsSection2 = false;
+    var allLists = Array.from(container.querySelectorAll("ul, ol, [role='list']"));
+
+    for (var li2 = 0; li2 < allLists.length; li2++) {
+      var list = allLists[li2];
+      var items = list.querySelectorAll("li, [role='listitem']");
+      if (items.length === 0) continue;
+      if (!foundSkillsSection2) {
+        var parentText = (list.parentElement ? list.parentElement.innerText || "" : "").toLowerCase();
+        if (parentText.indexOf("skills") >= 0 || parentText.indexOf("keahlian") >= 0) {
+          foundSkillsSection2 = true;
+        }
+      }
+      if (!foundSkillsSection2) continue;
+      for (var ii = 0; ii < items.length; ii++) {
+        var item = items[ii];
+        var txt2 = (item.textContent || "").trim();
+        if (txt2 && txt2.length >= 2 && txt2.length <= 50 && results.indexOf(txt2) < 0) {
+          results.push(txt2);
+        }
+      }
+      if (results.length > 0) break;
+    }
+  }
+
+  // Strategy 3: text-line parsing fallback
+  if (results.length === 0) {
+    var allText = (root.innerText || "").split("\n").map(function(s) { return s.trim(); });
+    var inSkills = false;
+
+    for (var ti = 0; ti < allText.length; ti++) {
+      var line = allText[ti];
+      var lower2 = line.toLowerCase();
+      if (lower2 === "skills" || lower2 === "keahlian" || lower2 === "keterampilan") {
+        inSkills = true;
+        continue;
+      }
+      if (!inSkills) continue;
+      var isNext2 = false;
+      for (var nj = 0; nj < nextSectionHeadings.length; nj++) {
+        if (lower2 === nextSectionHeadings[nj]) { isNext2 = true; break; }
+      }
+      if (isNext2) break;
+      if (!line) continue;
+
+      if (line.indexOf(",") >= 0) {
+        var parts = line.split(",").map(function(s) { return s.trim(); }).filter(Boolean);
+        for (var pi = 0; pi < parts.length; pi++) {
+          var part = parts[pi];
+          if (part.length >= 2 && part.length <= 50 && results.indexOf(part) < 0) {
+            results.push(part);
+          }
+        }
+      } else if (line.length >= 2 && line.length <= 50) {
+        if (results.indexOf(line) < 0) results.push(line);
+      }
+    }
+  }
+
+  return results;
+}
