@@ -1673,7 +1673,25 @@ function hasResumeOnDisk(c) {
   return Boolean(c.resumeLocalPath && fs.existsSync(c.resumeLocalPath));
 }
 
-/** ATS needs: email, phone (list), domicile, resume file, expected salary */
+function hasCareerHistoryData(c) {
+  return Array.isArray(c?.careerHistory) && c.careerHistory.length > 0;
+}
+
+function hasAnySeekDetailSections(c) {
+  return [
+    c.careerHistory,
+    c.education,
+    c.licencesAndCertifications,
+    c.applicationQuestions,
+    c.skills,
+  ].some((section) => Array.isArray(section) && section.length > 0);
+}
+
+function hasNoSeekDetailSections(c) {
+  return !hasAnySeekDetailSections(c);
+}
+
+/** ATS needs: email, phone (list), domicile, resume file, expected salary, SEEK profile details */
 function needsProfileEnrich(c) {
   // `salaryExpectation` is set by captureProfileDetails when the SEEK profile
   // contains an "Expected monthly salary" screening question. Treat a missing
@@ -1682,12 +1700,17 @@ function needsProfileEnrich(c) {
   !Object.prototype.hasOwnProperty.call(c, "salaryExpectation") &&
   !Object.prototype.hasOwnProperty.call(c, "expectedSalaryRaw");
   const resumeNeeded = !SCRAPER_CONFIG.skipResume && !hasResumeOnDisk(c);
+  const seekDetailsMissing = hasNoSeekDetailSections(c);
+  if (c.imported && seekDetailsMissing) {
+    c._seekDetailsBackfillNeeded = true;
+  }
   return (
     !c.email ||
     !c.location ||
     !c.domicile ||
     resumeNeeded ||
-    salaryMissing
+    salaryMissing ||
+    seekDetailsMissing
   );
 }
 
@@ -2054,9 +2077,16 @@ async function postCandidateBatchWith413Fallback(batch) {
 }
 
 async function sendToNuanuATS(candidates) {
-  const unsent = dedupeCandidates(candidates.filter((c) => !c.imported));
+  const unsent = dedupeCandidates(candidates.filter((c) => (
+    !c.imported || (c._seekDetailsBackfillNeeded && hasAnySeekDetailSections(c))
+  )));
   if (unsent.length === 0) {
-    console.log("⚠️  No unsent candidates to send");
+    const pendingBackfill = candidates.filter((c) => c._seekDetailsBackfillNeeded).length;
+    if (pendingBackfill > 0) {
+      console.log(`⚠️  ${pendingBackfill} imported candidate(s) still have no SEEK detail data to backfill`);
+    } else {
+      console.log("⚠️  No unsent candidates to send");
+    }
     return { importedCount: 0, skippedCount: 0, errorCount: 0 };
   }
 
@@ -2081,8 +2111,13 @@ async function sendToNuanuATS(candidates) {
 
     try {
       const result = await postCandidateBatchWith413Fallback(batch);
+      const backfillPayloads = batch.filter(hasCareerHistoryData).length;
+      const skippedCount = result.results?.skipped ?? 0;
+      if (backfillPayloads > 0 && skippedCount > 0) {
+        console.log(`  🔁 UPDATE: ${Math.min(backfillPayloads, skippedCount)} existing candidate(s) sent with non-empty career history`);
+      }
       console.log(
-        `  ✅ Batch ${i + 1}: ${result.results?.imported ?? 0} imported, ${result.results?.skipped ?? 0} skipped, ${result.results?.errors ?? 0} errors`,
+        `  ✅ Batch ${i + 1}: ${result.results?.imported ?? 0} imported, ${skippedCount} skipped, ${result.results?.errors ?? 0} errors`,
       );
 
       const details = result.results?.details;
@@ -2116,6 +2151,7 @@ async function sendToNuanuATS(candidates) {
   if (totalErrors === 0) {
     for (const c of unsent) {
       c.imported = true;
+      delete c._seekDetailsBackfillNeeded;
     }
   }
 
@@ -2156,7 +2192,7 @@ async function main() {
     currentCheckpointLastPage = cp.lastPage || 0;
     const need = candidatesToEnrich.filter(needsProfileEnrich);
     console.log(
-      `  Total: ${candidatesToEnrich.length} | need enrich: ${need.length} (missing email, location, or resume)`,
+      `  Total: ${candidatesToEnrich.length} | need enrich: ${need.length} (missing email, location, resume, salary, or SEEK details)`,
     );
 
     if (SCRAPER_CONFIG.importOnTheFly && !SCRAPER_CONFIG.scrapeOnly) {

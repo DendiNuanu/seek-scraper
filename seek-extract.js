@@ -1462,11 +1462,208 @@ export function extractCandidateCardsFromDom(jobTitle) {
 // (case-insensitive), then parse the structured content that follows.
 // Returns an empty array (never null/undefined) when the section is absent.
 
+function deduplicateText(text) {
+  if (!text || text.length < 20) return text;
+  var half = Math.floor(text.length / 2);
+  var first = text.slice(0, half).trim();
+  var second = text.slice(half).trim();
+  if (second.startsWith(first.slice(0, 30))) return first;
+
+  var lines = text.split("\n");
+  var mid = Math.floor(lines.length / 2);
+  var firstLines = lines.slice(0, mid).join("\n").trim();
+  var secondLines = lines.slice(mid).join("\n").trim();
+  if (firstLines && firstLines === secondLines) return firstLines;
+
+  return text;
+}
+
+function isRawDropdown(text) {
+  var countPattern = /\(\d+\)/g;
+  var matches = text ? text.match(countPattern) : null;
+  return matches && matches.length > 3;
+}
+
+function cleanApplicationAnswer(text) {
+  var answer = (text || "").trim();
+  if (answer === "\u2014" || answer === "-" || answer === "\u2013") return "";
+  if (isRawDropdown(answer)) return "";
+  return answer;
+}
+
+function deduplicateQuestions(questions) {
+  var seen = new Map();
+  for (var qi = 0; qi < questions.length; qi++) {
+    var q = questions[qi];
+    if (!q || !q.question) continue;
+    seen.set(q.question, q);
+  }
+  return Array.from(seen.values());
+}
+
+function isExactHeadingText(text, labels) {
+  var lower = (text || "").replace(/\s+/g, " ").trim().toLowerCase();
+  for (var i = 0; i < labels.length; i++) {
+    if (lower === labels[i]) return true;
+  }
+  return false;
+}
+
+function findSectionHeading(root, labels, fuzzyMatch) {
+  // SEEK class names are randomized, so section lookup must anchor to stable heading text only.
+  var searchRoot = root || document;
+  var candidates = Array.from(searchRoot.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b"));
+  if (searchRoot !== document) {
+    candidates = candidates.concat(Array.from(document.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b")));
+  }
+  var best = null;
+  for (var hi = 0; hi < candidates.length; hi++) {
+    var h = candidates[hi];
+    var text = (h.textContent || "").replace(/\s+/g, " ").trim();
+    var lower = text.toLowerCase();
+    var exact = isExactHeadingText(text, labels);
+    var fuzzy = fuzzyMatch && fuzzyMatch(lower);
+    if (!exact && !fuzzy) continue;
+    if (!best || text.length < (best.textContent || "").trim().length) best = h;
+  }
+  return best;
+}
+
+function getSectionContainer(heading) {
+  if (!heading) return null;
+  var container = heading.parentElement;
+  for (var d = 0; d < 6 && container && container !== document.body; d++) {
+    if (container.querySelectorAll("li, p, dd, dt, [role='listitem']").length > 0) break;
+    container = container.parentElement;
+  }
+  return container || heading.parentElement;
+}
+
+function sectionLinesFromHeading(root, heading, nextSectionHeadings) {
+  var allText = (root.innerText || "").split("\n").map(function(s) { return s.trim(); });
+  var headingText = (heading ? heading.textContent || "" : "").replace(/\s+/g, " ").trim().toLowerCase();
+  var inSection = false;
+  var lines = [];
+  for (var ti = 0; ti < allText.length; ti++) {
+    var line = allText[ti];
+    var lower = line.replace(/\s+/g, " ").trim().toLowerCase();
+    if (!inSection && lower === headingText) {
+      inSection = true;
+      continue;
+    }
+    if (!inSection) continue;
+    var isNext = false;
+    for (var ni = 0; ni < nextSectionHeadings.length; ni++) {
+      if (lower === nextSectionHeadings[ni]) { isNext = true; break; }
+    }
+    if (isNext) break;
+    if (line) lines.push(line);
+  }
+  return lines;
+}
+
 /**
  * Extract "Career history" section from the candidate detail panel.
  * Returns an array of { title, company, dates, description } objects.
  */
 export function extractCareerHistoryFromDetail() {
+  function deduplicateText(text) {
+    if (!text || text.length < 20) return text;
+    var half = Math.floor(text.length / 2);
+    var first = text.slice(0, half).trim();
+    var second = text.slice(half).trim();
+    if (second.startsWith(first.slice(0, 30))) return first;
+    var lines = text.split("\n");
+    var mid = Math.floor(lines.length / 2);
+    var firstLines = lines.slice(0, mid).join("\n").trim();
+    var secondLines = lines.slice(mid).join("\n").trim();
+    if (firstLines && firstLines === secondLines) return firstLines;
+    return text;
+  }
+
+  function isRawDropdown(text) {
+    var matches = text ? text.match(/\(\d+\)/g) : null;
+    return matches && matches.length > 3;
+  }
+
+  function cleanApplicationAnswer(text) {
+    var answer = (text || "").trim();
+    if (answer === "\u2014" || answer === "-" || answer === "\u2013") return "";
+    if (isRawDropdown(answer)) return "";
+    return answer;
+  }
+
+  function deduplicateQuestions(questions) {
+    var seen = new Map();
+    for (var qi = 0; qi < questions.length; qi++) {
+      var q = questions[qi];
+      if (!q || !q.question) continue;
+      seen.set(q.question, q);
+    }
+    return Array.from(seen.values());
+  }
+
+  function isExactHeadingText(text, labels) {
+    var lower = (text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    for (var i = 0; i < labels.length; i++) {
+      if (lower === labels[i]) return true;
+    }
+    return false;
+  }
+
+  function findSectionHeading(root, labels, fuzzyMatch) {
+    var searchRoot = root || document;
+    var selector = "h1, h2, h3, h4, h5, h6, strong, b, [role='heading']";
+    var candidates = Array.from(searchRoot.querySelectorAll(selector));
+    if (searchRoot !== document) {
+      candidates = candidates.concat(Array.from(document.querySelectorAll(selector)));
+    }
+    var best = null;
+    for (var hi = 0; hi < candidates.length; hi++) {
+      var h = candidates[hi];
+      var text = (h.textContent || "").replace(/\s+/g, " ").trim();
+      var lower = text.toLowerCase();
+      var exact = isExactHeadingText(text, labels);
+      var fuzzy = fuzzyMatch && fuzzyMatch(lower);
+      if (!exact && !fuzzy) continue;
+      if (!best || text.length < (best.textContent || "").trim().length) best = h;
+    }
+    return best;
+  }
+
+  function getSectionContainer(heading) {
+    if (!heading) return null;
+    var container = heading.parentElement;
+    for (var d = 0; d < 6 && container && container !== document.body; d++) {
+      if (container.querySelectorAll("li, p, dd, dt, [role='listitem']").length > 0) break;
+      container = container.parentElement;
+    }
+    return container || heading.parentElement;
+  }
+
+  function sectionLinesFromHeading(root, heading, nextSectionHeadings) {
+    var allText = (root.innerText || "").split("\n").map(function(s) { return s.trim(); });
+    var headingText = (heading ? heading.textContent || "" : "").replace(/\s+/g, " ").trim().toLowerCase();
+    var inSection = false;
+    var lines = [];
+    for (var ti = 0; ti < allText.length; ti++) {
+      var line = allText[ti];
+      var lower = line.replace(/\s+/g, " ").trim().toLowerCase();
+      if (!inSection && lower === headingText) {
+        inSection = true;
+        continue;
+      }
+      if (!inSection) continue;
+      var isNext = false;
+      for (var ni = 0; ni < nextSectionHeadings.length; ni++) {
+        if (lower === nextSectionHeadings[ni]) { isNext = true; break; }
+      }
+      if (isNext) break;
+      if (line) lines.push(line);
+    }
+    return lines;
+  }
+
   /**
    * Locate the root panel that contains the candidate detail sections.
    * Mirrors findPanelRoot() logic from extractCandidateDetailFromModal.
@@ -1504,31 +1701,74 @@ export function extractCareerHistoryFromDetail() {
   var root = findDetailPanel();
   var results = [];
 
-  var headings = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b, dt, div, span, p"));
-  var careerHeading = null;
-  for (var hi = 0; hi < headings.length; hi++) {
-    var h = headings[hi];
-    var t = (h.textContent || "").trim();
-    if (t.toLowerCase() === "career history" || t.toLowerCase() === "riwayat pekerjaan") {
-      if (!careerHeading || h.textContent.length < careerHeading.textContent.length) {
-        careerHeading = h;
-      }
-    }
-  }
+  var careerHeading = findSectionHeading(root, ["career history", "riwayat pekerjaan"]);
   if (!careerHeading) return results;
 
-  var container = careerHeading.parentElement;
-  for (var d = 0; d < 4 && container; d++) {
-    if (container.children.length >= 2) break;
-    container = container.parentElement;
-  }
+  var container = getSectionContainer(careerHeading);
   if (!container) return results;
 
   var dateRangePattern = /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s*[-–—]\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Current|Present|Sekarang|Now|Saat ini)\s*\d{0,4}/i;
   var yearRangePattern = /\d{4}\s*[-–—]\s*(\d{4}|Current|Present|Sekarang|Now|Saat ini)/i;
   var nextSectionHeadings = ["education", "pendidikan", "licences", "licenses", "sertifikasi", "application questions", "skills", "keahlian"];
+  function normalizedLine(line) { return (line || "").replace(/\s+/g, " ").trim().toLowerCase(); }
+  function pushUniqueLine(lines, seen, line) {
+    var key = normalizedLine(line);
+    if (!key || seen[key]) return;
+    seen[key] = true;
+    lines.push(line);
+  }
+  function deduplicateDescription(text) {
+    if (!text) return text;
+    text = String(text).replace(/\s+/g, " ").trim();
+    if (text.length < 20) return text;
+    var half = Math.floor(text.length / 2);
+    for (var offset = -30; offset <= 30; offset++) {
+      var splitPoint = half + offset;
+      if (splitPoint <= 0 || splitPoint >= text.length) continue;
+      var firstHalf = text.slice(0, splitPoint).trim();
+      var secondHalf = text.slice(splitPoint).trim();
+      if (firstHalf && secondHalf.startsWith(firstHalf.slice(0, Math.min(40, firstHalf.length)))) {
+        return firstHalf;
+      }
+    }
+    var chunks = deduplicateText(text).split(/\s+-\s+/);
+    var seenChunks = {};
+    var uniqueChunks = [];
+    for (var di = 0; di < chunks.length; di++) {
+      var chunk = chunks[di].trim();
+      var key = normalizeDedupeValue(chunk);
+      if (!key || seenChunks[key]) continue;
+      seenChunks[key] = true;
+      uniqueChunks.push(chunk);
+    }
+    return uniqueChunks.join(" - ").trim();
+  }
+  function normalizeDedupeValue(value) {
+    return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
+  }
+  function dedupeCareerHistory(entries) {
+    var seen = new Set();
+    var unique = [];
+    for (var ci = 0; ci < entries.length; ci++) {
+      var entry = entries[ci];
+      if (!entry || !entry.title) continue;
+      var key = [entry.title, entry.company, entry.dates].map(normalizeDedupeValue).join("|");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(entry);
+    }
+    return unique;
+  }
+  function countDateMatches(text) {
+    var count = 0;
+    var lines = String(text || "").split("\n");
+    for (var ci = 0; ci < lines.length; ci++) {
+      if (dateRangePattern.test(lines[ci]) || yearRangePattern.test(lines[ci])) count++;
+    }
+    return count;
+  }
 
-  var allElements = Array.from(container.querySelectorAll("div, section, article, li"));
+  var allElements = Array.from(container.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b, div, section, article, li"));
   var foundCareerSection = false;
 
   for (var ei = 0; ei < allElements.length; ei++) {
@@ -1552,10 +1792,13 @@ export function extractCareerHistoryFromDetail() {
     if (!txt || txt.length < 5) continue;
     if (!dateRangePattern.test(txt) && !yearRangePattern.test(txt)) continue;
 
+    // Parent containers often contain multiple sibling entries; parse smaller children instead.
+    if (countDateMatches(txt) > 1) continue;
+
     var lines = txt.split("\n").map(function(s) { return s.trim(); }).filter(Boolean);
     if (lines.length < 2) continue;
 
-    var titleEl = el.querySelector("h3, h4, h5, h6, strong, b, [data-automation*='title'], [data-automation*='position']");
+    var titleEl = el.querySelector("h3, h4, h5, h6, strong, [data-cy*='title'], [aria-label*='title'], [data-automation*='title'], [data-automation*='position']");
     var title = titleEl ? (titleEl.textContent || "").trim() : (lines[0] || "");
     var company = "";
     var dates = "";
@@ -1587,11 +1830,12 @@ export function extractCareerHistoryFromDetail() {
     knownLines[company] = true;
     knownLines[dates] = true;
     var descLines = [];
+    var seenDescLines = {};
     for (var li4 = 0; li4 < lines.length; li4++) {
       var l3 = lines[li4];
-      if (!knownLines[l3] && l3.length > 10) descLines.push(l3);
+      if (!knownLines[l3] && l3.length > 10) pushUniqueLine(descLines, seenDescLines, l3);
     }
-    description = descLines.join(" ") || null;
+    description = deduplicateText(descLines.join(" ")) || null;
 
     if (title) {
       results.push({
@@ -1604,8 +1848,8 @@ export function extractCareerHistoryFromDetail() {
   }
 
   if (results.length === 0) {
-    var allText = (root.innerText || "").split("\n").map(function(s) { return s.trim(); });
-    var inCareer = false;
+    var allText = sectionLinesFromHeading(root, careerHeading, nextSectionHeadings);
+    var inCareer = true;
     var currentEntry = null;
 
     for (var ti = 0; ti < allText.length; ti++) {
@@ -1631,13 +1875,25 @@ export function extractCareerHistoryFromDetail() {
         continue;
       }
       if (currentEntry && line.length > 10) {
-        currentEntry.description = currentEntry.description ? currentEntry.description + " " + line : line;
+        if ((dateRangePattern.test(allText[ti + 1] || "") || yearRangePattern.test(allText[ti + 1] || "")) && ti > 0) {
+          continue;
+        }
+        currentEntry._descriptionLines = currentEntry._descriptionLines || [];
+        currentEntry._seenDescriptionLines = currentEntry._seenDescriptionLines || {};
+        pushUniqueLine(currentEntry._descriptionLines, currentEntry._seenDescriptionLines, line);
+        currentEntry.description = currentEntry._descriptionLines.join(" ") || null;
       }
     }
     if (currentEntry && currentEntry.title) results.push(currentEntry);
   }
 
-  return results;
+  for (var ri = 0; ri < results.length; ri++) {
+    results[ri].description = deduplicateDescription(results[ri].description);
+    delete results[ri]._descriptionLines;
+    delete results[ri]._seenDescriptionLines;
+  }
+
+  return dedupeCareerHistory(results);
 }
 
 /**
@@ -1645,6 +1901,103 @@ export function extractCareerHistoryFromDetail() {
  * Returns an array of { degree, institution, status, description } objects.
  */
 export function extractEducationFromDetail() {
+  function deduplicateText(text) {
+    if (!text || text.length < 20) return text;
+    var half = Math.floor(text.length / 2);
+    var first = text.slice(0, half).trim();
+    var second = text.slice(half).trim();
+    if (second.startsWith(first.slice(0, 30))) return first;
+    var lines = text.split("\n");
+    var mid = Math.floor(lines.length / 2);
+    var firstLines = lines.slice(0, mid).join("\n").trim();
+    var secondLines = lines.slice(mid).join("\n").trim();
+    if (firstLines && firstLines === secondLines) return firstLines;
+    return text;
+  }
+
+  function isRawDropdown(text) {
+    var matches = text ? text.match(/\(\d+\)/g) : null;
+    return matches && matches.length > 3;
+  }
+
+  function cleanApplicationAnswer(text) {
+    var answer = (text || "").trim();
+    if (answer === "\u2014" || answer === "-" || answer === "\u2013") return "";
+    if (isRawDropdown(answer)) return "";
+    return answer;
+  }
+
+  function deduplicateQuestions(questions) {
+    var seen = new Map();
+    for (var qi = 0; qi < questions.length; qi++) {
+      var q = questions[qi];
+      if (!q || !q.question) continue;
+      seen.set(q.question, q);
+    }
+    return Array.from(seen.values());
+  }
+
+  function isExactHeadingText(text, labels) {
+    var lower = (text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    for (var i = 0; i < labels.length; i++) {
+      if (lower === labels[i]) return true;
+    }
+    return false;
+  }
+
+  function findSectionHeading(root, labels, fuzzyMatch) {
+    var searchRoot = root || document;
+    var selector = "h1, h2, h3, h4, h5, h6, strong, b, [role='heading']";
+    var candidates = Array.from(searchRoot.querySelectorAll(selector));
+    if (searchRoot !== document) {
+      candidates = candidates.concat(Array.from(document.querySelectorAll(selector)));
+    }
+    var best = null;
+    for (var hi = 0; hi < candidates.length; hi++) {
+      var h = candidates[hi];
+      var text = (h.textContent || "").replace(/\s+/g, " ").trim();
+      var lower = text.toLowerCase();
+      var exact = isExactHeadingText(text, labels);
+      var fuzzy = fuzzyMatch && fuzzyMatch(lower);
+      if (!exact && !fuzzy) continue;
+      if (!best || text.length < (best.textContent || "").trim().length) best = h;
+    }
+    return best;
+  }
+
+  function getSectionContainer(heading) {
+    if (!heading) return null;
+    var container = heading.parentElement;
+    for (var d = 0; d < 6 && container && container !== document.body; d++) {
+      if (container.querySelectorAll("li, p, dd, dt, [role='listitem']").length > 0) break;
+      container = container.parentElement;
+    }
+    return container || heading.parentElement;
+  }
+
+  function sectionLinesFromHeading(root, heading, nextSectionHeadings) {
+    var allText = (root.innerText || "").split("\n").map(function(s) { return s.trim(); });
+    var headingText = (heading ? heading.textContent || "" : "").replace(/\s+/g, " ").trim().toLowerCase();
+    var inSection = false;
+    var lines = [];
+    for (var ti = 0; ti < allText.length; ti++) {
+      var line = allText[ti];
+      var lower = line.replace(/\s+/g, " ").trim().toLowerCase();
+      if (!inSection && lower === headingText) {
+        inSection = true;
+        continue;
+      }
+      if (!inSection) continue;
+      var isNext = false;
+      for (var ni = 0; ni < nextSectionHeadings.length; ni++) {
+        if (lower === nextSectionHeadings[ni]) { isNext = true; break; }
+      }
+      if (isNext) break;
+      if (line) lines.push(line);
+    }
+    return lines;
+  }
+
   function findDetailPanel() {
     var allLinks = Array.from(document.querySelectorAll('a[href^="mailto:"]'));
     for (var li = 0; li < allLinks.length; li++) {
@@ -1678,32 +2031,54 @@ export function extractEducationFromDetail() {
   var root = findDetailPanel();
   var results = [];
 
-  var headings = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b, dt, div, span, p"));
-  var eduHeading = null;
-  for (var hi = 0; hi < headings.length; hi++) {
-    var h = headings[hi];
-    var t = (h.textContent || "").trim();
-    if (t.toLowerCase() === "education" || t.toLowerCase() === "pendidikan") {
-      if (!eduHeading || h.textContent.length < eduHeading.textContent.length) {
-        eduHeading = h;
-      }
-    }
-  }
+  var eduHeading = findSectionHeading(root, ["education", "pendidikan"]);
   if (!eduHeading) return results;
 
-  var container = eduHeading.parentElement;
-  for (var d = 0; d < 4 && container; d++) {
-    if (container.children.length >= 2) break;
-    container = container.parentElement;
-  }
+  var container = getSectionContainer(eduHeading);
   if (!container) return results;
 
   var dateRangePattern = /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s*[-–—]\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Current|Present|Sekarang|Now|Saat ini)\s*\d{0,4}/i;
   var yearPattern = /\d{4}/;
   var finishedPattern = /(Finished|Lulus|Graduated|Completed|Selesai)\s*\d{4}/i;
   var nextSectionHeadings = ["licences", "licenses", "sertifikasi", "certifications", "application questions", "skills", "keahlian", "career history"];
+  function isApplicationQuestionHeading(text) {
+    var lower = (text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    return lower === "application questions" || lower === "pertanyaan penyaringan" || lower === "screening questions";
+  }
+  function hasApplicationQuestionBlob(text) {
+    var value = text || "";
+    var labels = ["Gaji bulanan", "Pendidikan kandidat", "Pengalaman", "Waktu pemberitahuan", "Kemampuan"];
+    var matches = 0;
+    for (var ai = 0; ai < labels.length; ai++) {
+      if (value.indexOf(labels[ai]) >= 0) matches++;
+    }
+    return matches >= 2;
+  }
+  function normalizedLine(line) { return (line || "").replace(/\s+/g, " ").trim().toLowerCase(); }
+  function pushUniqueLine(lines, seen, line) {
+    var key = normalizedLine(line);
+    if (!key || seen[key]) return;
+    seen[key] = true;
+    lines.push(line);
+  }
+  function normalizeDedupeValue(value) {
+    return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
+  }
+  function dedupeEducation(entries) {
+    var seen = new Set();
+    var unique = [];
+    for (var di = 0; di < entries.length; di++) {
+      var entry = entries[di];
+      if (!entry || !entry.degree) continue;
+      var key = [entry.degree, entry.institution].map(normalizeDedupeValue).join("|");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(entry);
+    }
+    return unique;
+  }
 
-  var allElements = Array.from(container.querySelectorAll("div, section, article, li"));
+  var allElements = Array.from(container.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b, div, section, article, li"));
   var foundEduSection = false;
 
   for (var ei = 0; ei < allElements.length; ei++) {
@@ -1732,7 +2107,7 @@ export function extractEducationFromDetail() {
     var lines = txt.split("\n").map(function(s) { return s.trim(); }).filter(Boolean);
     if (lines.length < 1) continue;
 
-    var degreeEl = el.querySelector("h3, h4, h5, h6, strong, b");
+    var degreeEl = el.querySelector("h3, h4, h5, h6, strong, [data-cy*='degree'], [aria-label*='degree'], [data-cy*='education']");
     var degree = degreeEl ? (degreeEl.textContent || "").trim() : (lines[0] || "");
     var institution = "";
     var status = "";
@@ -1767,13 +2142,14 @@ export function extractEducationFromDetail() {
     if (institution) knownLines[institution] = true;
     if (status) knownLines[status] = true;
     var descLines = [];
+    var seenDescLines = {};
     for (var li4 = 0; li4 < lines.length; li4++) {
       var l3 = lines[li4];
-      if (!knownLines[l3] && l3.length > 10) descLines.push(l3);
+      if (!knownLines[l3] && l3.length > 10) pushUniqueLine(descLines, seenDescLines, l3);
     }
-    description = descLines.join(" ") || null;
+    description = deduplicateText(descLines.join(" ")) || null;
 
-    if (degree) {
+    if (degree && !isApplicationQuestionHeading(degree) && !hasApplicationQuestionBlob(txt)) {
       results.push({
         degree: degree,
         institution: institution || null,
@@ -1784,8 +2160,8 @@ export function extractEducationFromDetail() {
   }
 
   if (results.length === 0) {
-    var allText = (root.innerText || "").split("\n").map(function(s) { return s.trim(); });
-    var inEdu = false;
+    var allText = sectionLinesFromHeading(root, eduHeading, nextSectionHeadings);
+    var inEdu = true;
     var currentEntry = null;
 
     for (var ti = 0; ti < allText.length; ti++) {
@@ -1817,7 +2193,15 @@ export function extractEducationFromDetail() {
     if (currentEntry && currentEntry.degree) results.push(currentEntry);
   }
 
-  return results;
+  for (var ri = 0; ri < results.length; ri++) {
+    results[ri].description = deduplicateText(results[ri].description);
+  }
+
+  results = results.filter(function(entry) {
+    return entry && !isApplicationQuestionHeading(entry.degree) && !hasApplicationQuestionBlob(entry.institution || "") && !hasApplicationQuestionBlob(entry.description || "");
+  });
+
+  return dedupeEducation(results);
 }
 
 /**
@@ -1826,6 +2210,133 @@ export function extractEducationFromDetail() {
  * Returns an array of { name, organization, dates, description } objects.
  */
 export function extractLicencesAndCertificationsFromDetail() {
+  function deduplicateText(text) {
+    if (!text || text.length < 20) return text;
+    var half = Math.floor(text.length / 2);
+    var first = text.slice(0, half).trim();
+    var second = text.slice(half).trim();
+    if (second.startsWith(first.slice(0, 30))) return first;
+    var lines = text.split("\n");
+    var mid = Math.floor(lines.length / 2);
+    var firstLines = lines.slice(0, mid).join("\n").trim();
+    var secondLines = lines.slice(mid).join("\n").trim();
+    if (firstLines && firstLines === secondLines) return firstLines;
+    return text;
+  }
+
+  function isRawDropdown(text) {
+    var matches = text ? text.match(/\(\d+\)/g) : null;
+    return matches && matches.length > 3;
+  }
+
+  function cleanApplicationAnswer(text) {
+    var answer = (text || "").trim();
+    if (answer === "\u2014" || answer === "-" || answer === "\u2013") return "";
+    if (isRawDropdown(answer)) return "";
+    return answer;
+  }
+
+  function deduplicateQuestions(questions) {
+    var seen = new Map();
+    for (var qi = 0; qi < questions.length; qi++) {
+      var q = questions[qi];
+      if (!q || !q.question) continue;
+      seen.set(q.question, q);
+    }
+    return Array.from(seen.values());
+  }
+
+  function isExactHeadingText(text, labels) {
+    var lower = (text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    for (var i = 0; i < labels.length; i++) {
+      if (lower === labels[i]) return true;
+    }
+    return false;
+  }
+
+  function findSectionHeading(root, labels, fuzzyMatch) {
+    var searchRoot = root || document;
+    var selector = "h1, h2, h3, h4, h5, h6, strong, b, [role='heading']";
+    var candidates = Array.from(searchRoot.querySelectorAll(selector));
+    if (searchRoot !== document) {
+      candidates = candidates.concat(Array.from(document.querySelectorAll(selector)));
+    }
+    var best = null;
+    for (var hi = 0; hi < candidates.length; hi++) {
+      var h = candidates[hi];
+      var text = (h.textContent || "").replace(/\s+/g, " ").trim();
+      var lower = text.toLowerCase();
+      var exact = isExactHeadingText(text, labels);
+      var fuzzy = fuzzyMatch && fuzzyMatch(lower);
+      if (!exact && !fuzzy) continue;
+      if (!best || text.length < (best.textContent || "").trim().length) best = h;
+    }
+    return best;
+  }
+
+  function getSectionContainer(heading) {
+    if (!heading) return null;
+    var container = heading.parentElement;
+    for (var d = 0; d < 6 && container && container !== document.body; d++) {
+      if (container.querySelectorAll("li, p, dd, dt, [role='listitem']").length > 0) break;
+      container = container.parentElement;
+    }
+    return container || heading.parentElement;
+  }
+
+  function sectionLinesFromHeading(root, heading, nextSectionHeadings) {
+    var allText = (root.innerText || "").split("\n").map(function(s) { return s.trim(); });
+    var headingText = (heading ? heading.textContent || "" : "").replace(/\s+/g, " ").trim().toLowerCase();
+    var inSection = false;
+    var lines = [];
+    for (var ti = 0; ti < allText.length; ti++) {
+      var line = allText[ti];
+      var lower = line.replace(/\s+/g, " ").trim().toLowerCase();
+      if (!inSection && lower === headingText) {
+        inSection = true;
+        continue;
+      }
+      if (!inSection) continue;
+      var isNext = false;
+      for (var ni = 0; ni < nextSectionHeadings.length; ni++) {
+        if (lower === nextSectionHeadings[ni]) { isNext = true; break; }
+      }
+      if (isNext) break;
+      if (line) lines.push(line);
+    }
+    return lines;
+  }
+
+  function isApplicationQuestionHeading(text) {
+    var lower = (text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    return lower === "application questions" || lower === "pertanyaan penyaringan" || lower === "screening questions";
+  }
+  function hasApplicationQuestionBlob(text) {
+    var value = text || "";
+    var labels = ["Gaji bulanan", "Pendidikan kandidat", "Pengalaman", "Waktu pemberitahuan", "Kemampuan"];
+    var matches = 0;
+    for (var ai = 0; ai < labels.length; ai++) {
+      if (value.indexOf(labels[ai]) >= 0) matches++;
+    }
+    return matches >= 2;
+  }
+  function normalizeDedupeValue(value) {
+    return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
+  }
+  function dedupeLicences(entries) {
+    var seen = new Set();
+    var unique = [];
+    for (var li = 0; li < entries.length; li++) {
+      var entry = entries[li];
+      if (!entry || !entry.name) continue;
+      var key = [entry.name, entry.organization].map(normalizeDedupeValue).join("|");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(entry);
+    }
+    return unique;
+  }
+
   function findDetailPanel() {
     var allLinks = Array.from(document.querySelectorAll('a[href^="mailto:"]'));
     for (var li = 0; li < allLinks.length; li++) {
@@ -1859,37 +2370,23 @@ export function extractLicencesAndCertificationsFromDetail() {
   var root = findDetailPanel();
   var results = [];
 
-  var headings = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b, dt, div, span, p"));
-  var licHeading = null;
-  for (var hi = 0; hi < headings.length; hi++) {
-    var h = headings[hi];
-    var t = (h.textContent || "").trim();
-    var lower = t.toLowerCase();
-    if ((lower.indexOf("licences") >= 0 || lower.indexOf("licenses") >= 0) && lower.indexOf("certifications") >= 0) {
-      if (!licHeading || h.textContent.length < licHeading.textContent.length) {
-        licHeading = h;
-      }
+  var licHeading = findSectionHeading(
+    root,
+    ["licences and certifications", "licenses and certifications", "lisensi dan sertifikasi", "lisensi & sertifikasi", "sertifikasi dan lisensi"],
+    function(lower) {
+      return (lower.indexOf("licences") >= 0 || lower.indexOf("licenses") >= 0) && lower.indexOf("certifications") >= 0;
     }
-    if (lower === "lisensi dan sertifikasi" || lower === "lisensi & sertifikasi" || lower === "sertifikasi dan lisensi") {
-      if (!licHeading || h.textContent.length < licHeading.textContent.length) {
-        licHeading = h;
-      }
-    }
-  }
+  );
   if (!licHeading) return results;
 
-  var container = licHeading.parentElement;
-  for (var d = 0; d < 4 && container; d++) {
-    if (container.children.length >= 2) break;
-    container = container.parentElement;
-  }
+  var container = getSectionContainer(licHeading);
   if (!container) return results;
 
   var dateRangePattern = /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s*[-–—]\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Current|Present|Sekarang|Now|Saat ini)\s*\d{0,4}/i;
   var yearRangePattern = /\d{4}\s*[-–—]\s*(\d{4}|Current|Present|Sekarang|Now|Saat ini)/i;
   var nextSectionHeadings = ["application questions", "pertanyaan penyaringan", "skills", "keahlian", "education", "pendidikan"];
 
-  var allElements = Array.from(container.querySelectorAll("div, section, article, li"));
+  var allElements = Array.from(container.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b, div, section, article, li"));
   var foundLicSection = false;
 
   for (var ei = 0; ei < allElements.length; ei++) {
@@ -1918,7 +2415,7 @@ export function extractLicencesAndCertificationsFromDetail() {
     var lines = txt.split("\n").map(function(s) { return s.trim(); }).filter(Boolean);
     if (lines.length < 1) continue;
 
-    var nameEl = el.querySelector("h3, h4, h5, h6, strong, b");
+    var nameEl = el.querySelector("h3, h4, h5, h6, strong, [data-cy*='licence'], [data-cy*='license'], [aria-label*='licence'], [aria-label*='license']");
     var name = nameEl ? (nameEl.textContent || "").trim() : (lines[0] || "");
     var organization = "";
     var dates = "";
@@ -1943,9 +2440,9 @@ export function extractLicencesAndCertificationsFromDetail() {
       var l2 = lines[li3];
       if (!knownLines[l2] && l2.length > 10) descLines.push(l2);
     }
-    description = descLines.join(" ") || null;
+    description = deduplicateText(descLines.join(" ")) || null;
 
-    if (name) {
+    if (name && !isApplicationQuestionHeading(name) && !hasApplicationQuestionBlob(txt)) {
       results.push({
         name: name,
         organization: organization || null,
@@ -1956,8 +2453,8 @@ export function extractLicencesAndCertificationsFromDetail() {
   }
 
   if (results.length === 0) {
-    var allText = (root.innerText || "").split("\n").map(function(s) { return s.trim(); });
-    var inLic = false;
+    var allText = sectionLinesFromHeading(root, licHeading, nextSectionHeadings);
+    var inLic = true;
     var currentEntry = null;
 
     for (var ti = 0; ti < allText.length; ti++) {
@@ -1993,7 +2490,15 @@ export function extractLicencesAndCertificationsFromDetail() {
     if (currentEntry && currentEntry.name) results.push(currentEntry);
   }
 
-  return results;
+  for (var ri = 0; ri < results.length; ri++) {
+    results[ri].description = deduplicateText(results[ri].description);
+  }
+
+  results = results.filter(function(entry) {
+    return entry && !isApplicationQuestionHeading(entry.name) && !hasApplicationQuestionBlob(entry.organization || "") && !hasApplicationQuestionBlob(entry.description || "");
+  });
+
+  return dedupeLicences(results);
 }
 
 /**
@@ -2002,6 +2507,120 @@ export function extractLicencesAndCertificationsFromDetail() {
  * Questions can vary between candidates — do NOT hardcode a list.
  */
 export function extractApplicationQuestionsFromDetail() {
+  function deduplicateText(text) {
+    if (!text || text.length < 20) return text;
+    var half = Math.floor(text.length / 2);
+    var first = text.slice(0, half).trim();
+    var second = text.slice(half).trim();
+    if (second.startsWith(first.slice(0, 30))) return first;
+    var lines = text.split("\n");
+    var mid = Math.floor(lines.length / 2);
+    var firstLines = lines.slice(0, mid).join("\n").trim();
+    var secondLines = lines.slice(mid).join("\n").trim();
+    if (firstLines && firstLines === secondLines) return firstLines;
+    return text;
+  }
+
+  function isRawDropdown(text) {
+    var matches = text ? text.match(/\(\d+\)/g) : null;
+    return matches && matches.length > 3;
+  }
+
+  function cleanApplicationAnswer(text) {
+    var answer = (text || "").trim();
+    if (answer === "\u2014" || answer === "-" || answer === "\u2013") return "";
+    if (isRawDropdown(answer)) return "";
+    return answer;
+  }
+
+  function isApplicationQuestionHeading(text) {
+    var lower = (text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    return lower === "application questions" || lower === "pertanyaan penyaringan" || lower === "screening questions";
+  }
+
+  function isBlobAnswer(answer) {
+    var text = answer || "";
+    var knownQuestions = ["Gaji bulanan", "Pendidikan kandidat", "Pengalaman", "Waktu pemberitahuan", "Kemampuan"];
+    var matches = 0;
+    for (var bi = 0; bi < knownQuestions.length; bi++) {
+      if (text.indexOf(knownQuestions[bi]) >= 0) matches++;
+    }
+    return matches >= 2;
+  }
+
+  function deduplicateQuestions(questions) {
+    var seen = new Map();
+    for (var qi = 0; qi < questions.length; qi++) {
+      var q = questions[qi];
+      if (!q || !q.question) continue;
+      if (isApplicationQuestionHeading(q.question)) continue;
+      if (isBlobAnswer(q.answer)) continue;
+      seen.set(q.question.replace(/\s+/g, " ").trim(), q);
+    }
+    return Array.from(seen.values());
+  }
+
+  function isExactHeadingText(text, labels) {
+    var lower = (text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    for (var i = 0; i < labels.length; i++) {
+      if (lower === labels[i]) return true;
+    }
+    return false;
+  }
+
+  function findSectionHeading(root, labels, fuzzyMatch) {
+    var searchRoot = root || document;
+    var selector = "h1, h2, h3, h4, h5, h6, strong, b, [role='heading']";
+    var candidates = Array.from(searchRoot.querySelectorAll(selector));
+    if (searchRoot !== document) {
+      candidates = candidates.concat(Array.from(document.querySelectorAll(selector)));
+    }
+    var best = null;
+    for (var hi = 0; hi < candidates.length; hi++) {
+      var h = candidates[hi];
+      var text = (h.textContent || "").replace(/\s+/g, " ").trim();
+      var lower = text.toLowerCase();
+      var exact = isExactHeadingText(text, labels);
+      var fuzzy = fuzzyMatch && fuzzyMatch(lower);
+      if (!exact && !fuzzy) continue;
+      if (!best || text.length < (best.textContent || "").trim().length) best = h;
+    }
+    return best;
+  }
+
+  function getSectionContainer(heading) {
+    if (!heading) return null;
+    var container = heading.parentElement;
+    for (var d = 0; d < 6 && container && container !== document.body; d++) {
+      if (container.querySelectorAll("li, p, dd, dt, [role='listitem']").length > 0) break;
+      container = container.parentElement;
+    }
+    return container || heading.parentElement;
+  }
+
+  function sectionLinesFromHeading(root, heading, nextSectionHeadings) {
+    var allText = (root.innerText || "").split("\n").map(function(s) { return s.trim(); });
+    var headingText = (heading ? heading.textContent || "" : "").replace(/\s+/g, " ").trim().toLowerCase();
+    var inSection = false;
+    var lines = [];
+    for (var ti = 0; ti < allText.length; ti++) {
+      var line = allText[ti];
+      var lower = line.replace(/\s+/g, " ").trim().toLowerCase();
+      if (!inSection && lower === headingText) {
+        inSection = true;
+        continue;
+      }
+      if (!inSection) continue;
+      var isNext = false;
+      for (var ni = 0; ni < nextSectionHeadings.length; ni++) {
+        if (lower === nextSectionHeadings[ni]) { isNext = true; break; }
+      }
+      if (isNext) break;
+      if (line) lines.push(line);
+    }
+    return lines;
+  }
+
   function findDetailPanel() {
     var allLinks = Array.from(document.querySelectorAll('a[href^="mailto:"]'));
     for (var li = 0; li < allLinks.length; li++) {
@@ -2035,31 +2654,16 @@ export function extractApplicationQuestionsFromDetail() {
   var root = findDetailPanel();
   var results = [];
 
-  var headings = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b, dt, div, span, p"));
-  var aqHeading = null;
-  for (var hi = 0; hi < headings.length; hi++) {
-    var h = headings[hi];
-    var t = (h.textContent || "").trim();
-    var lower = t.toLowerCase();
-    if (lower === "application questions" || lower === "pertanyaan penyaringan" || lower === "screening questions") {
-      if (!aqHeading || h.textContent.length < aqHeading.textContent.length) {
-        aqHeading = h;
-      }
-    }
-  }
+  var aqHeading = findSectionHeading(root, ["application questions", "pertanyaan penyaringan", "screening questions"]);
   if (!aqHeading) return results;
 
-  var container = aqHeading.parentElement;
-  for (var d = 0; d < 5 && container; d++) {
-    if (container.children.length >= 2) break;
-    container = container.parentElement;
-  }
+  var container = getSectionContainer(aqHeading);
   if (!container) return results;
 
   var nextSectionHeadings = ["skills", "keahlian", "licences", "licenses", "certifications", "education", "pendidikan", "career history"];
 
   // Strategy 1: dt/dd pairs (description list)
-  var dls = Array.from(container.querySelectorAll("dl, [data-automation*='question'], [data-automation*='screening']"));
+  var dls = Array.from(container.querySelectorAll("dl, [data-cy*='question'], [data-cy*='screening'], [aria-label*='question'], [data-automation*='question'], [data-automation*='screening']"));
   for (var di = 0; di < dls.length; di++) {
     var dl = dls[di];
     var dts = dl.querySelectorAll("dt");
@@ -2067,10 +2671,16 @@ export function extractApplicationQuestionsFromDetail() {
     for (var i = 0; i < dts.length; i++) {
       var question = (dts[i].textContent || "").trim();
       var answerEl = dds[i];
-      var answer = answerEl ? (answerEl.textContent || "").trim() : "";
-      if (answer === "\u2014" || answer === "-" || answer === "\u2013") answer = "";
-      if (!question) continue;
-      results.push({ question: question, answer: answer || null });
+      var answer = cleanApplicationAnswer(answerEl ? (answerEl.textContent || "") : "");
+      if (!answer && answerEl) {
+        var sibling = answerEl.nextElementSibling;
+        for (var si = 0; si < 4 && sibling; si++, sibling = sibling.nextElementSibling) {
+          answer = cleanApplicationAnswer(sibling.textContent || "");
+          if (answer) break;
+        }
+      }
+      if (!question || isRawDropdown(question)) continue;
+      if (answer) results.push({ question: question, answer: answer });
     }
     if (results.length > 0) break;
   }
@@ -2078,7 +2688,7 @@ export function extractApplicationQuestionsFromDetail() {
   // Strategy 2: label/value div pairs
   if (results.length === 0) {
     var foundAqSection = false;
-    var allElements = Array.from(container.querySelectorAll("div, span, p, li"));
+    var allElements = Array.from(container.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b, div, span, p, li, [data-cy], [aria-label]"));
 
     for (var ei = 0; ei < allElements.length; ei++) {
       var el = allElements[ei];
@@ -2098,7 +2708,7 @@ export function extractApplicationQuestionsFromDetail() {
         continue;
       }
       if (!foundAqSection) continue;
-      if (!txt || txt.length < 2) continue;
+      if (!txt || txt.length < 2 || isRawDropdown(txt)) continue;
 
       var isQuestion = txt.indexOf("?") >= 0 ||
         /^(Gaji|Pendidikan|Pengalaman|Waktu|Kemampuan|Bahasa|Expected|Salary|Education|Experience|Notice|Language|Skill|Apakah|Berapa|Kapan|Dimana|Siapa|Bagaimana|Apa|Are you|Do you|Have you|Can you|Will you|What|How|Why|Where|When)/i.test(txt);
@@ -2111,8 +2721,15 @@ export function extractApplicationQuestionsFromDetail() {
           if (nextText.toLowerCase() === nextSectionHeadings[nj]) { isNextHeading2 = true; break; }
         }
         if (isNextHeading2) continue;
-        if (nextText && nextText !== "\u2014" && nextText !== "-" && nextText !== "\u2013") {
-          results.push({ question: txt, answer: nextText });
+        var answerText = cleanApplicationAnswer(nextText);
+        if (!answerText) {
+          for (var ai = ei + 2; ai < allElements.length && ai < ei + 6; ai++) {
+            answerText = cleanApplicationAnswer(allElements[ai].textContent || "");
+            if (answerText) break;
+          }
+        }
+        if (answerText) {
+          results.push({ question: txt, answer: answerText });
           ei++;
         }
       }
@@ -2121,8 +2738,8 @@ export function extractApplicationQuestionsFromDetail() {
 
   // Strategy 3: text-line parsing fallback
   if (results.length === 0) {
-    var allText = (root.innerText || "").split("\n").map(function(s) { return s.trim(); });
-    var inAq = false;
+    var allText = sectionLinesFromHeading(root, aqHeading, nextSectionHeadings);
+    var inAq = true;
 
     for (var ti = 0; ti < allText.length; ti++) {
       var line = allText[ti];
@@ -2137,7 +2754,7 @@ export function extractApplicationQuestionsFromDetail() {
         if (lower2 === nextSectionHeadings[nj]) { isNext2 = true; break; }
       }
       if (isNext2) break;
-      if (!line) continue;
+      if (!line || isRawDropdown(line)) continue;
 
       var isQuestion2 = line.indexOf("?") >= 0 ||
         /^(Gaji|Pendidikan|Pengalaman|Waktu|Kemampuan|Bahasa|Expected|Salary|Education|Experience|Notice|Language|Skill|Apakah|Berapa|Kapan|Dimana|Siapa|Bagaimana|Apa|Are you|Do you|Have you|Can you|Will you|What|How|Why|Where|When)/i.test(line);
@@ -2148,15 +2765,29 @@ export function extractApplicationQuestionsFromDetail() {
         for (var nk = 0; nk < nextSectionHeadings.length; nk++) {
           if (answer.toLowerCase() === nextSectionHeadings[nk]) { isNext3 = true; break; }
         }
-        if (answer && answer !== "\u2014" && answer !== "-" && answer !== "\u2013" && !isNext3) {
-          results.push({ question: line, answer: answer });
+        var cleanAnswer = !isNext3 ? cleanApplicationAnswer(answer) : "";
+        if (!cleanAnswer) {
+          for (var aj = ti + 2; aj < allText.length && aj < ti + 6; aj++) {
+            var candidateAnswer = allText[aj];
+            var candidateLower = candidateAnswer.toLowerCase();
+            var candidateIsNext = false;
+            for (var nl = 0; nl < nextSectionHeadings.length; nl++) {
+              if (candidateLower === nextSectionHeadings[nl]) { candidateIsNext = true; break; }
+            }
+            if (candidateIsNext) break;
+            cleanAnswer = cleanApplicationAnswer(candidateAnswer);
+            if (cleanAnswer) break;
+          }
+        }
+        if (cleanAnswer) {
+          results.push({ question: line, answer: cleanAnswer });
           ti++;
         }
       }
     }
   }
 
-  return results;
+  return deduplicateQuestions(results);
 }
 
 /**
@@ -2164,6 +2795,103 @@ export function extractApplicationQuestionsFromDetail() {
  * Returns an array of skill tag strings.
  */
 export function extractSkillsFromDetail() {
+  function deduplicateText(text) {
+    if (!text || text.length < 20) return text;
+    var half = Math.floor(text.length / 2);
+    var first = text.slice(0, half).trim();
+    var second = text.slice(half).trim();
+    if (second.startsWith(first.slice(0, 30))) return first;
+    var lines = text.split("\n");
+    var mid = Math.floor(lines.length / 2);
+    var firstLines = lines.slice(0, mid).join("\n").trim();
+    var secondLines = lines.slice(mid).join("\n").trim();
+    if (firstLines && firstLines === secondLines) return firstLines;
+    return text;
+  }
+
+  function isRawDropdown(text) {
+    var matches = text ? text.match(/\(\d+\)/g) : null;
+    return matches && matches.length > 3;
+  }
+
+  function cleanApplicationAnswer(text) {
+    var answer = (text || "").trim();
+    if (answer === "\u2014" || answer === "-" || answer === "\u2013") return "";
+    if (isRawDropdown(answer)) return "";
+    return answer;
+  }
+
+  function deduplicateQuestions(questions) {
+    var seen = new Map();
+    for (var qi = 0; qi < questions.length; qi++) {
+      var q = questions[qi];
+      if (!q || !q.question) continue;
+      seen.set(q.question, q);
+    }
+    return Array.from(seen.values());
+  }
+
+  function isExactHeadingText(text, labels) {
+    var lower = (text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    for (var i = 0; i < labels.length; i++) {
+      if (lower === labels[i]) return true;
+    }
+    return false;
+  }
+
+  function findSectionHeading(root, labels, fuzzyMatch) {
+    var searchRoot = root || document;
+    var selector = "h1, h2, h3, h4, h5, h6, strong, b, [role='heading']";
+    var candidates = Array.from(searchRoot.querySelectorAll(selector));
+    if (searchRoot !== document) {
+      candidates = candidates.concat(Array.from(document.querySelectorAll(selector)));
+    }
+    var best = null;
+    for (var hi = 0; hi < candidates.length; hi++) {
+      var h = candidates[hi];
+      var text = (h.textContent || "").replace(/\s+/g, " ").trim();
+      var lower = text.toLowerCase();
+      var exact = isExactHeadingText(text, labels);
+      var fuzzy = fuzzyMatch && fuzzyMatch(lower);
+      if (!exact && !fuzzy) continue;
+      if (!best || text.length < (best.textContent || "").trim().length) best = h;
+    }
+    return best;
+  }
+
+  function getSectionContainer(heading) {
+    if (!heading) return null;
+    var container = heading.parentElement;
+    for (var d = 0; d < 6 && container && container !== document.body; d++) {
+      if (container.querySelectorAll("li, p, dd, dt, [role='listitem']").length > 0) break;
+      container = container.parentElement;
+    }
+    return container || heading.parentElement;
+  }
+
+  function sectionLinesFromHeading(root, heading, nextSectionHeadings) {
+    var allText = (root.innerText || "").split("\n").map(function(s) { return s.trim(); });
+    var headingText = (heading ? heading.textContent || "" : "").replace(/\s+/g, " ").trim().toLowerCase();
+    var inSection = false;
+    var lines = [];
+    for (var ti = 0; ti < allText.length; ti++) {
+      var line = allText[ti];
+      var lower = line.replace(/\s+/g, " ").trim().toLowerCase();
+      if (!inSection && lower === headingText) {
+        inSection = true;
+        continue;
+      }
+      if (!inSection) continue;
+      var isNext = false;
+      for (var ni = 0; ni < nextSectionHeadings.length; ni++) {
+        if (lower === nextSectionHeadings[ni]) { isNext = true; break; }
+      }
+      if (isNext) break;
+      if (line) lines.push(line);
+    }
+    return lines;
+  }
+
   function findDetailPanel() {
     var allLinks = Array.from(document.querySelectorAll('a[href^="mailto:"]'));
     for (var li = 0; li < allLinks.length; li++) {
@@ -2197,7 +2925,7 @@ export function extractSkillsFromDetail() {
   var root = findDetailPanel();
   var results = [];
 
-  var headings = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b, dt, div, span, p"));
+  var headings = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b"));
   var skillsHeading = null;
   for (var hi = 0; hi < headings.length; hi++) {
     var h = headings[hi];
@@ -2211,17 +2939,13 @@ export function extractSkillsFromDetail() {
   }
   if (!skillsHeading) return results;
 
-  var container = skillsHeading.parentElement;
-  for (var d = 0; d < 5 && container; d++) {
-    if (container.children.length >= 1) break;
-    container = container.parentElement;
-  }
+  var container = getSectionContainer(skillsHeading);
   if (!container) return results;
 
   var foundSkillsSection = false;
   var nextSectionHeadings = ["career history", "education", "pendidikan", "licences", "licenses", "application questions", "pertanyaan penyaringan"];
 
-  var allElements = Array.from(container.querySelectorAll("span, div, li, button, a, [data-automation*='skill'], [data-automation*='tag'], [data-automation*='badge'], [data-automation*='chip']"));
+  var allElements = Array.from(container.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b, span, div, li, button, a, [data-automation*='skill'], [data-automation*='tag'], [data-automation*='badge'], [data-automation*='chip']"));
 
   for (var ei = 0; ei < allElements.length; ei++) {
     var el = allElements[ei];
