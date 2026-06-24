@@ -1717,31 +1717,117 @@ export function extractCareerHistoryFromDetail() {
     seen[key] = true;
     lines.push(line);
   }
+  function removeDuplicateSentences(text) {
+    if (!text) return text;
+    var source = String(text).replace(/\s+/g, " ").trim();
+    if (source.length < 40) return source;
+
+    var parts = source.split(/(?<=[.!?])\s+|(?=\u2022\s*)|(?=\b\d+\.\s*)/).filter(Boolean);
+    if (parts.length <= 1) parts = source.split(/\s{2,}|\s+-\s+/).filter(Boolean);
+
+    var seen = {};
+    var unique = [];
+    for (var si = 0; si < parts.length; si++) {
+      var part = parts[si].replace(/\s+/g, " ").trim();
+      if (!part) continue;
+      var key = part
+        .replace(/^\u2022\s*/, "")
+        .replace(/^\d+\.\s*/, "")
+        .replace(/[^a-z0-9]+/gi, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+      if (!key || seen[key]) continue;
+      seen[key] = true;
+      unique.push(part);
+    }
+
+    var cleaned = unique.join(" ").replace(/\s+/g, " ").trim();
+    if (!cleaned) return source;
+
+    var minLen = Math.floor(cleaned.length * 0.25);
+    var maxLen = Math.floor(cleaned.length * 0.75);
+    for (var splitAt = minLen; splitAt <= maxLen; splitAt++) {
+      var firstPart = cleaned.slice(0, splitAt).trim();
+      var remainder = cleaned.slice(splitAt).trim();
+      if (!firstPart || !remainder) continue;
+      var firstKey = firstPart.replace(/[^a-z0-9]+/gi, " ").replace(/\s+/g, " ").trim().toLowerCase();
+      var remainderKey = remainder.replace(/[^a-z0-9]+/gi, " ").replace(/\s+/g, " ").trim().toLowerCase();
+      if (remainderKey.indexOf(firstKey) === 0) return firstPart;
+    }
+
+    return cleaned;
+  }
+
   function deduplicateDescription(text) {
     if (!text) return text;
-    text = String(text).replace(/\s+/g, " ").trim();
-    if (text.length < 20) return text;
-    var half = Math.floor(text.length / 2);
-    for (var offset = -30; offset <= 30; offset++) {
-      var splitPoint = half + offset;
-      if (splitPoint <= 0 || splitPoint >= text.length) continue;
-      var firstHalf = text.slice(0, splitPoint).trim();
-      var secondHalf = text.slice(splitPoint).trim();
-      if (firstHalf && secondHalf.startsWith(firstHalf.slice(0, Math.min(40, firstHalf.length)))) {
-        return firstHalf;
+    text = String(text).replace(/More\u2060?/gi, "").replace(/\([^)]*years?[^)]*months?[^)]*\)/gi, "").replace(/\s+/g, " ").trim();
+    if (text.length < 40) return text;
+
+    var bulletParts = text.split(/(?=\u2022\s*)/).filter(Boolean);
+    if (bulletParts.length > 1) {
+      var seenBullets = {};
+      var uniqueBullets = [];
+      for (var bi = 0; bi < bulletParts.length; bi++) {
+        var bulletKey = bulletParts[bi].replace(/^\u2022\s*/, "").replace(/\s+/g, " ").trim().toLowerCase();
+        if (seenBullets[bulletKey]) continue;
+        seenBullets[bulletKey] = true;
+        uniqueBullets.push(bulletParts[bi].trim());
+      }
+      text = uniqueBullets.join(" ").trim();
+    }
+
+    text = text.replace(/([^\s])(\d+\.\s*)/g, "$1 $2");
+    var numbered = text.split(/(?=\b\d+\.\s*)/).filter(Boolean);
+    if (numbered.length > 1) {
+      var seenNumbers = {};
+      var maxNumberSeen = 0;
+      var numberedUnique = [];
+      for (var ni = 0; ni < numbered.length; ni++) {
+        var numberMatch = numbered[ni].match(/^\s*(\d+)\./);
+        if (numberMatch) {
+          var currentNumber = parseInt(numberMatch[1], 10);
+          if (seenNumbers[numberMatch[1]] || currentNumber <= maxNumberSeen) continue;
+          seenNumbers[numberMatch[1]] = true;
+          maxNumberSeen = Math.max(maxNumberSeen, currentNumber);
+        }
+        numberedUnique.push(numbered[ni].trim());
+      }
+      text = numberedUnique.join(" ").trim();
+    }
+
+    text = text.replace(/\s+\d+\s*$/, "").trim();
+
+    var minLen = Math.floor(text.length * 0.25);
+    var maxLen = Math.floor(text.length * 0.75);
+
+    for (var splitAt = minLen; splitAt <= maxLen; splitAt++) {
+      var firstPart = text.slice(0, splitAt).trim();
+      var remainder = text.slice(splitAt).trim();
+      var checkLen = Math.min(60, firstPart.length);
+      var firstPartStart = firstPart.slice(0, checkLen).toLowerCase();
+      var remainderStart = remainder.slice(0, checkLen).toLowerCase();
+
+      if (firstPartStart && firstPartStart === remainderStart) {
+        return removeDuplicateSentences(firstPart);
       }
     }
-    var chunks = deduplicateText(text).split(/\s+-\s+/);
-    var seenChunks = {};
-    var uniqueChunks = [];
-    for (var di = 0; di < chunks.length; di++) {
-      var chunk = chunks[di].trim();
-      var key = normalizeDedupeValue(chunk);
-      if (!key || seenChunks[key]) continue;
-      seenChunks[key] = true;
-      uniqueChunks.push(chunk);
+
+    var segments = text.split(/(?=\d+\.|\u2022|\-\s)/);
+    if (segments.length > 2) {
+      var half = Math.floor(segments.length / 2);
+      var firstHalfText = segments.slice(0, half).join("").trim();
+      var secondHalfText = segments.slice(half).join("").trim();
+      var segmentCheckLen = Math.min(30, firstHalfText.length);
+      if (
+        firstHalfText.slice(0, segmentCheckLen).toLowerCase() ===
+        secondHalfText.slice(0, segmentCheckLen).toLowerCase()
+      ) {
+        return removeDuplicateSentences(firstHalfText);
+      }
     }
-    return uniqueChunks.join(" - ").trim();
+
+    return removeDuplicateSentences(text);
   }
   function normalizeDedupeValue(value) {
     return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
@@ -1838,8 +1924,19 @@ export function extractCareerHistoryFromDetail() {
     description = deduplicateText(descLines.join(" ")) || null;
 
     if (title) {
+      var compactTitle = title.replace(/\s+/g, " ").trim();
+      var titleDateMatch = compactTitle.match(dateRangePattern) || compactTitle.match(yearRangePattern);
+      if (titleDateMatch) {
+        if (!dates) dates = titleDateMatch[0];
+        var dateIndex = compactTitle.indexOf(titleDateMatch[0]);
+        var beforeDate = compactTitle.slice(0, dateIndex).trim();
+        var afterDate = compactTitle.slice(dateIndex + titleDateMatch[0].length).trim();
+        if (afterDate) description = description ? description + " " + afterDate : afterDate;
+        compactTitle = beforeDate;
+      }
+      description = removeDuplicateSentences(deduplicateDescription(description)) || null;
       results.push({
-        title: title,
+        title: compactTitle,
         company: company || null,
         dates: dates || null,
         description: description
@@ -1888,7 +1985,7 @@ export function extractCareerHistoryFromDetail() {
   }
 
   for (var ri = 0; ri < results.length; ri++) {
-    results[ri].description = deduplicateDescription(results[ri].description);
+    results[ri].description = removeDuplicateSentences(deduplicateDescription(results[ri].description));
     delete results[ri]._descriptionLines;
     delete results[ri]._seenDescriptionLines;
   }
@@ -2064,16 +2161,128 @@ export function extractEducationFromDetail() {
   function normalizeDedupeValue(value) {
     return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
   }
+  function normalizeInstitution(name) {
+    return (name || "")
+      .replace(/([a-z])([A-Z])/g, "$1 $2")
+      .toLowerCase()
+      .replace(/\b(university|universitas|of|the|institut|institute|college|school|academy|akademi|politeknik|bachelor|master|doctor|diploma|sarjana|magister|law)\b/g, " ")
+      .replace(/[^a-z0-9]+/g, " ")
+      .split(" ")
+      .filter(Boolean)
+      .sort()
+      .join(" ");
+  }
+  function educationYear(entry) {
+    var values = [entry && entry.graduationYear, entry && entry.endDate, entry && entry.status];
+    for (var yi = 0; yi < values.length; yi++) {
+      var match = String(values[yi] || "").match(/\b(19|20)\d{2}\b/);
+      if (match) return match[0];
+    }
+    return "";
+  }
+  function normalizeEducationDegree(value) {
+    var degree = String(value || "").replace(/([a-z])([A-Z])/g, "$1 $2");
+    degree = normalizeDedupeValue(degree);
+    degree = degree.replace(/(university|universitas|andalas|finished|lulus|graduated|completed|selesai|\b(19|20)\d{2}\b).*$/g, "");
+    return degree.trim();
+  }
+  function normalizeInstitutionForEntry(entry) {
+    var combined = ((entry && entry.institution) || "") + " " + ((entry && entry.degree) || "");
+    return normalizeInstitution(combined);
+  }
+  function isApplicationDataEntry(entry) {
+    var combined = ((entry && entry.degree) || "") + " " + ((entry && entry.institution) || "");
+    combined = combined.toLowerCase();
+    return combined.indexOf("application") >= 0 ||
+      combined.indexOf("gaji bulanan") >= 0 ||
+      combined.indexOf("pendidikan kandidat") >= 0 ||
+      combined.indexOf("pengalaman") >= 0;
+  }
+  function isMergedEducationContainer(entry) {
+    var combined = ((entry && entry.degree) || "") + " " + ((entry && entry.institution) || "") + " " + ((entry && entry.status) || "");
+    var degreeMatches = combined.match(/\b(bachelor|master|doctor|diploma|sarjana|magister)\b/gi) || [];
+    var yearMatches = combined.match(/\b(19|20)\d{2}\b/g) || [];
+    return degreeMatches.length > 1 && yearMatches.length > 1;
+  }
+  function normalizeEducationEntry(entry) {
+    if (!entry || !entry.degree) return entry;
+    var degreeText = String(entry.degree || "").replace(/\s+/g, " ").trim();
+    var institutionText = String(entry.institution || "").replace(/\s+/g, " ").trim();
+    var joined = (degreeText + institutionText).replace(/\s+/g, " ").trim();
+
+    var statusMatch = joined.match(/(Finished|Lulus|Graduated|Completed|Selesai)\s*((?:19|20)\d{2})/i);
+    var andalasJoinedMatch = joined.match(/^(Bachelor\s+of\s+Law)Andalas\s+University\s+(Finished|Lulus|Graduated|Completed|Selesai)\s*((?:19|20)\d{2})$/i);
+    if (andalasJoinedMatch) {
+      entry.degree = andalasJoinedMatch[1].replace(/\s+/g, " ").trim();
+      entry.institution = "University of Andalas";
+      entry.status = ((andalasJoinedMatch[2] || "") + " " + (andalasJoinedMatch[3] || "")).trim();
+      return entry;
+    }
+
+    var instMatch = joined.match(/(University|Universitas|Institut|Institute|College|School|Academy|Akademi|Politeknik)/i);
+    if (statusMatch && instMatch) {
+      var statusIndex = joined.indexOf(statusMatch[0]);
+      var instIndex = instMatch.index;
+      var degreePart = joined.slice(0, instIndex).trim();
+      var instPart = joined.slice(instIndex, statusIndex).trim();
+      if (degreePart && instPart) {
+        entry.degree = degreePart.replace(/\s+/g, " ").trim();
+        entry.institution = instPart.replace(/\s+/g, " ").trim();
+        entry.status = ((statusMatch[1] || "") + " " + (statusMatch[2] || "")).trim();
+        return entry;
+      }
+    }
+
+    if (entry.institution) {
+      entry.institution = institutionText;
+      if (entry.status && entry.institution.indexOf(entry.status) >= 0) {
+        entry.institution = entry.institution.slice(0, entry.institution.indexOf(entry.status)).trim();
+      }
+      entry.institution = entry.institution.replace(/(Finished|Lulus|Graduated|Completed|Selesai)\s*(?:19|20)\d{2}.*$/i, "").trim();
+    }
+
+    if (/^Bachelor\s+of\s+LawAndalas$/i.test(degreeText) && /^University$/i.test(institutionText)) {
+      entry.degree = "Bachelor of Law";
+      entry.institution = "University of Andalas";
+      if (!entry.status && statusMatch) entry.status = ((statusMatch[1] || "") + " " + (statusMatch[2] || "")).trim();
+      return entry;
+    }
+
+    var match = degreeText.match(/^(.*?)(University|Universitas|Institut|Institute|College|School|Academy|Akademi|Politeknik)\s+(.+?)(Finished|Lulus|Graduated|Completed|Selesai)\s*((?:19|20)\d{2})$/i);
+    if (!match) return entry;
+
+    entry.degree = match[1].trim();
+    entry.institution = ((match[2] || "") + " " + (match[3] || "")).replace(/\s+/g, " ").trim();
+    entry.status = ((match[4] || "") + " " + (match[5] || "")).trim();
+    return entry;
+  }
   function dedupeEducation(entries) {
-    var seen = new Set();
     var unique = [];
     for (var di = 0; di < entries.length; di++) {
-      var entry = entries[di];
-      if (!entry || !entry.degree) continue;
-      var key = [entry.degree, entry.institution].map(normalizeDedupeValue).join("|");
-      if (seen.has(key)) continue;
-      seen.add(key);
-      unique.push(entry);
+      var entry = normalizeEducationEntry(entries[di]);
+      if (!entry || !entry.degree || isApplicationDataEntry(entry) || isMergedEducationContainer(entry)) continue;
+      var duplicate = false;
+      for (var ui = 0; ui < unique.length; ui++) {
+        var prev = unique[ui];
+        var sameDegree = normalizeEducationDegree(prev.degree) === normalizeEducationDegree(entry.degree);
+        var prevYear = educationYear(prev);
+        var entryYear = educationYear(entry);
+        var sameYear = (prevYear && entryYear && prevYear === entryYear) ||
+          normalizeDedupeValue(prev.endDate) === normalizeDedupeValue(entry.endDate);
+        var normPrev = normalizeInstitutionForEntry(prev);
+        var normCurr = normalizeInstitutionForEntry(entry);
+        var similarInst = normPrev && normCurr && (
+          normPrev.indexOf(normCurr) >= 0 ||
+          normCurr.indexOf(normPrev) >= 0 ||
+          normPrev === normCurr
+        );
+        if (sameDegree && similarInst && (sameYear || normPrev === normCurr)) {
+          duplicate = true;
+          if (entry.institution && (!prev.institution || normalizeInstitution(entry.institution).length > normalizeInstitution(prev.institution).length || entry.institution.length > prev.institution.length)) prev.institution = entry.institution;
+          break;
+        }
+      }
+      if (!duplicate) unique.push(entry);
     }
     return unique;
   }
@@ -2198,7 +2407,7 @@ export function extractEducationFromDetail() {
   }
 
   results = results.filter(function(entry) {
-    return entry && !isApplicationQuestionHeading(entry.degree) && !hasApplicationQuestionBlob(entry.institution || "") && !hasApplicationQuestionBlob(entry.description || "");
+    return entry && !isApplicationQuestionHeading(entry.degree) && !isApplicationDataEntry(entry) && !hasApplicationQuestionBlob(entry.institution || "") && !hasApplicationQuestionBlob(entry.description || "");
   });
 
   return dedupeEducation(results);
@@ -2210,18 +2419,60 @@ export function extractEducationFromDetail() {
  * Returns an array of { name, organization, dates, description } objects.
  */
 export function extractLicencesAndCertificationsFromDetail() {
+  function removeDuplicateSentences(text) {
+    if (!text) return text;
+    var source = String(text).replace(/\s+/g, " ").trim();
+    if (source.length < 40) return source;
+
+    var parts = source.split(/(?<=[.!?])\s+|(?=\u2022\s*)|(?=\b\d+\.\s*)/).filter(Boolean);
+    if (parts.length <= 1) parts = source.split(/\s{2,}|\s+-\s+/).filter(Boolean);
+
+    var seen = {};
+    var unique = [];
+    for (var si = 0; si < parts.length; si++) {
+      var part = parts[si].replace(/\s+/g, " ").trim();
+      if (!part) continue;
+      var key = part
+        .replace(/^\u2022\s*/, "")
+        .replace(/^\d+\.\s*/, "")
+        .replace(/[^a-z0-9]+/gi, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+      if (!key || seen[key]) continue;
+      seen[key] = true;
+      unique.push(part);
+    }
+
+    var cleaned = unique.join(" ").replace(/\s+/g, " ").trim();
+    if (!cleaned) return source;
+
+    var minLen = Math.floor(cleaned.length * 0.25);
+    var maxLen = Math.floor(cleaned.length * 0.75);
+    for (var splitAt = minLen; splitAt <= maxLen; splitAt++) {
+      var firstPart = cleaned.slice(0, splitAt).trim();
+      var remainder = cleaned.slice(splitAt).trim();
+      if (!firstPart || !remainder) continue;
+      var firstKey = firstPart.replace(/[^a-z0-9]+/gi, " ").replace(/\s+/g, " ").trim().toLowerCase();
+      var remainderKey = remainder.replace(/[^a-z0-9]+/gi, " ").replace(/\s+/g, " ").trim().toLowerCase();
+      if (remainderKey.indexOf(firstKey) === 0) return firstPart;
+    }
+
+    return cleaned;
+  }
+
   function deduplicateText(text) {
     if (!text || text.length < 20) return text;
     var half = Math.floor(text.length / 2);
     var first = text.slice(0, half).trim();
     var second = text.slice(half).trim();
-    if (second.startsWith(first.slice(0, 30))) return first;
+    if (second.startsWith(first.slice(0, 30))) return removeDuplicateSentences(first);
     var lines = text.split("\n");
     var mid = Math.floor(lines.length / 2);
     var firstLines = lines.slice(0, mid).join("\n").trim();
     var secondLines = lines.slice(mid).join("\n").trim();
-    if (firstLines && firstLines === secondLines) return firstLines;
-    return text;
+    if (firstLines && firstLines === secondLines) return removeDuplicateSentences(firstLines);
+    return removeDuplicateSentences(text);
   }
 
   function isRawDropdown(text) {
@@ -2323,6 +2574,81 @@ export function extractLicencesAndCertificationsFromDetail() {
   function normalizeDedupeValue(value) {
     return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
   }
+  function countDateMatches(text) {
+    var normalized = String(text || "").replace(/([a-z])((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4})/g, "$1 $2");
+    var monthMatches = normalized.match(new RegExp(dateRangePattern.source, "gi")) || [];
+    var yearMatches = normalized.match(new RegExp(yearRangePattern.source, "gi")) || [];
+    return monthMatches.length + yearMatches.length;
+  }
+  function splitMergedLicenceText(text) {
+    var normalized = String(text || "")
+      .replace(/([a-z])((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4})/g, "$1 $2")
+      .replace(/(Current|Present|Sekarang|Now|Saat ini)(?=[A-Z])/g, "$1\n")
+      .replace(/(\(\d{4}\))(?=[A-Z])/g, "$1\n");
+    var chunks = normalized.split("\n").map(function(s) { return s.trim(); }).filter(Boolean);
+    var entries = [];
+    for (var ci = 0; ci < chunks.length; ci++) {
+      var chunk = chunks[ci];
+      var dateMatch = chunk.match(dateRangePattern) || chunk.match(yearRangePattern);
+      if (!dateMatch) continue;
+      var beforeDate = chunk.slice(0, chunk.indexOf(dateMatch[0])).trim();
+      var afterDate = chunk.slice(chunk.indexOf(dateMatch[0]) + dateMatch[0].length).trim();
+      var byIndex = beforeDate.search(/\sby\s/i);
+      var org = "";
+      var name = beforeDate;
+      if (byIndex >= 0) {
+        name = beforeDate.slice(0, byIndex).trim();
+        org = beforeDate.slice(byIndex + 4).trim();
+      } else {
+        var orgMatch = beforeDate.match(/^(.*?)(\b[A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*){0,3}(?:Education|Educations|Educatioon|University|Univesity|Department|Dept|Institute|Company|Group))$/);
+        if (orgMatch) {
+          name = orgMatch[1].trim();
+          org = orgMatch[2].trim();
+        }
+      }
+      var description = afterDate.replace(/^[-–—\s]+/, "").trim();
+      if (name) {
+        entries.push({
+          name: name,
+          organization: org || null,
+          dates: dateMatch[0],
+          description: removeDuplicateSentences(deduplicateText(description)) || null
+        });
+      }
+    }
+    return entries;
+  }
+  function normalizeLicenceName(value) {
+    var normalized = (value || "")
+      .replace(/([a-z])([A-Z])/g, "$1 $2")
+      .toLowerCase()
+      .replace(/\(?(?:19|20)\d{2}\)?/g, " ")
+      .replace(/\b(by|certification|certificate|licence|license|lisensi|sertifikasi|training|course|program|education|educations|educatioon)\b/g, " ")
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    var tokens = normalized.split(" ").filter(Boolean);
+    if (tokens.length > 1 && tokens.length % 2 === 0) {
+      var half = tokens.length / 2;
+      if (tokens.slice(0, half).join(" ") === tokens.slice(half).join(" ")) {
+        normalized = tokens.slice(0, half).join(" ");
+      }
+    }
+    return normalized;
+  }
+  function tokenOverlapScore(a, b) {
+    var aTokens = normalizeLicenceName(a).split(" ").filter(Boolean);
+    var bTokens = normalizeLicenceName(b).split(" ").filter(Boolean);
+    if (!aTokens.length || !bTokens.length) return 0;
+    var bMap = {};
+    var matches = 0;
+    for (var bi = 0; bi < bTokens.length; bi++) bMap[bTokens[bi]] = true;
+    for (var ai = 0; ai < aTokens.length; ai++) {
+      if (bMap[aTokens[ai]]) matches++;
+    }
+    return matches / Math.max(aTokens.length, bTokens.length);
+  }
   function dedupeLicences(entries) {
     var seen = new Set();
     var unique = [];
@@ -2332,7 +2658,29 @@ export function extractLicencesAndCertificationsFromDetail() {
       var key = [entry.name, entry.organization].map(normalizeDedupeValue).join("|");
       if (seen.has(key)) continue;
       seen.add(key);
-      unique.push(entry);
+
+      var duplicate = false;
+      for (var ui = 0; ui < unique.length; ui++) {
+        var prev = unique[ui];
+        var sameOrg = normalizeDedupeValue(prev.organization || prev.issuer) === normalizeDedupeValue(entry.organization || entry.issuer);
+        var prevName = normalizeLicenceName(prev.name);
+        var entryName = normalizeLicenceName(entry.name);
+        var overlap = tokenOverlapScore(prev.name, entry.name);
+        var similarName = prevName && entryName && (
+          prevName === entryName ||
+          prevName.indexOf(entryName) >= 0 ||
+          entryName.indexOf(prevName) >= 0 ||
+          overlap >= 0.7
+        );
+        var datedDuplicate = similarName && (prev.dates || entry.dates) && overlap >= 0.5;
+        if ((similarName && (sameOrg || !prev.organization || !entry.organization)) || datedDuplicate) {
+          duplicate = true;
+          if (!prev.description && entry.description) prev.description = entry.description;
+          if (!prev.dates && entry.dates) prev.dates = entry.dates;
+          break;
+        }
+      }
+      if (!duplicate) unique.push(entry);
     }
     return unique;
   }
@@ -2412,6 +2760,12 @@ export function extractLicencesAndCertificationsFromDetail() {
     var hasDate = dateRangePattern.test(txt) || yearRangePattern.test(txt);
     if (!hasDate && txt.length < 8) continue;
 
+    if (countDateMatches(txt) > 1) {
+      var splitEntries = splitMergedLicenceText(txt);
+      for (var si = 0; si < splitEntries.length; si++) results.push(splitEntries[si]);
+      continue;
+    }
+
     var lines = txt.split("\n").map(function(s) { return s.trim(); }).filter(Boolean);
     if (lines.length < 1) continue;
 
@@ -2440,7 +2794,7 @@ export function extractLicencesAndCertificationsFromDetail() {
       var l2 = lines[li3];
       if (!knownLines[l2] && l2.length > 10) descLines.push(l2);
     }
-    description = deduplicateText(descLines.join(" ")) || null;
+    description = removeDuplicateSentences(deduplicateText(descLines.join(" "))) || null;
 
     if (name && !isApplicationQuestionHeading(name) && !hasApplicationQuestionBlob(txt)) {
       results.push({
@@ -2491,11 +2845,19 @@ export function extractLicencesAndCertificationsFromDetail() {
   }
 
   for (var ri = 0; ri < results.length; ri++) {
-    results[ri].description = deduplicateText(results[ri].description);
+    results[ri].description = removeDuplicateSentences(deduplicateText(results[ri].description));
   }
 
   results = results.filter(function(entry) {
-    return entry && !isApplicationQuestionHeading(entry.name) && !hasApplicationQuestionBlob(entry.organization || "") && !hasApplicationQuestionBlob(entry.description || "");
+    var combined = ((entry && entry.name) || "") + " " + ((entry && (entry.issuer || entry.organization)) || "");
+    combined = combined.toLowerCase();
+    return entry &&
+      !isApplicationQuestionHeading(entry.name) &&
+      combined.indexOf("application") < 0 &&
+      combined.indexOf("gaji bulanan") < 0 &&
+      combined.indexOf("pendidikan kandidat") < 0 &&
+      !hasApplicationQuestionBlob(entry.organization || "") &&
+      !hasApplicationQuestionBlob(entry.description || "");
   });
 
   return dedupeLicences(results);
@@ -2922,6 +3284,24 @@ export function extractSkillsFromDetail() {
     return document.body;
   }
 
+  function normalizeSkill(value) {
+    return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
+  }
+  function pushUniqueSkill(list, value) {
+    var skill = (value || "").replace(/\s+/g, " ").trim();
+    var key = normalizeSkill(skill);
+    if (!key) return;
+    for (var si = 0; si < list.length; si++) {
+      if (normalizeSkill(list[si]) === key) return;
+    }
+    list.push(skill);
+  }
+  function dedupeSkills(list) {
+    var unique = [];
+    for (var si = 0; si < list.length; si++) pushUniqueSkill(unique, list[si]);
+    return unique;
+  }
+
   var root = findDetailPanel();
   var results = [];
 
@@ -2970,7 +3350,7 @@ export function extractSkillsFromDetail() {
     if (txt.length >= 2 && txt.length <= 50 && txt.indexOf("\n") < 0 &&
         !/^(career|education|licence|license|certification|application|screening|skill|resume|profile|verification)/i.test(txt) &&
         !/^(riwayat|pendidikan|lisensi|sertifikasi|pertanyaan|keahlian|keterampilan)/i.test(txt)) {
-      if (results.indexOf(txt) < 0) results.push(txt);
+      pushUniqueSkill(results, txt);
     }
   }
 
@@ -2993,8 +3373,8 @@ export function extractSkillsFromDetail() {
       for (var ii = 0; ii < items.length; ii++) {
         var item = items[ii];
         var txt2 = (item.textContent || "").trim();
-        if (txt2 && txt2.length >= 2 && txt2.length <= 50 && results.indexOf(txt2) < 0) {
-          results.push(txt2);
+        if (txt2 && txt2.length >= 2 && txt2.length <= 50) {
+          pushUniqueSkill(results, txt2);
         }
       }
       if (results.length > 0) break;
@@ -3025,15 +3405,15 @@ export function extractSkillsFromDetail() {
         var parts = line.split(",").map(function(s) { return s.trim(); }).filter(Boolean);
         for (var pi = 0; pi < parts.length; pi++) {
           var part = parts[pi];
-          if (part.length >= 2 && part.length <= 50 && results.indexOf(part) < 0) {
-            results.push(part);
+          if (part.length >= 2 && part.length <= 50) {
+            pushUniqueSkill(results, part);
           }
         }
       } else if (line.length >= 2 && line.length <= 50) {
-        if (results.indexOf(line) < 0) results.push(line);
+        pushUniqueSkill(results, line);
       }
     }
   }
 
-  return results;
+  return dedupeSkills(results);
 }
