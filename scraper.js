@@ -12,6 +12,7 @@ import {
   safeGoto,
 } from "./seek-auth.js";
 import fs from "fs";
+import { execFileSync } from "child_process";
 import {
   clickYourCandidatesRowByPhone,
   createNetworkCollector,
@@ -1195,6 +1196,18 @@ async function enrichFromProfileUrl(page, candidate, profileUrl, returnUrl, netw
 
   console.log("[PROFILE TAB READY]", salaryReady ? "salary/content loaded" : "timeout — extracting anyway");
 
+  await page.waitForFunction(() => {
+    const headings = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6,strong'));
+    const hasCareer = headings.some((h) => {
+      const text = h.textContent.trim();
+      return text === 'Career history' || text === 'Education' || text === 'Skills';
+    });
+    const hasAppQ = headings.some((h) => h.textContent.trim() === 'Application questions');
+    return hasCareer || hasAppQ;
+  }, { timeout: 15000 }).catch(() => {
+    console.log('      [WAIT] Profile sections not found within timeout, extracting anyway');
+  });
+
   await page.evaluate(async () => {
     // Scroll the candidate detail panel so SEEK lazy-renders
     // "Application questions" / "Pertanyaan penyaringan" at the bottom.
@@ -1981,7 +1994,25 @@ function payloadByteSize(payload) {
   return Buffer.byteLength(JSON.stringify(payload), "utf8");
 }
 
-/** Attach base64 resume from local downloads/ for API upload to Supabase */
+function copyResumeToAtsServer(resumeLocalPath) {
+  const localFileName = path.basename(resumeLocalPath);
+  const targetPath = `/root/Nuanu_HR_Recruitment_ATS/public/uploads/resumes/${localFileName}`;
+
+  try {
+    execFileSync(
+      "scp",
+      [resumeLocalPath, `root@168.144.36.41:${targetPath}`],
+      { timeout: 30000, stdio: "ignore" },
+    );
+    console.log(`      📎 Resume uploaded to server: ${localFileName}`);
+    return `https://hr-ats.nuanu.site/uploads/resumes/${encodeURIComponent(localFileName)}`;
+  } catch (err) {
+    console.log(`      ⚠ Resume SCP failed: ${err.message}`);
+    return null;
+  }
+}
+
+/** Attach server-local resume URL; do not send base64 to the old Supabase upload path. */
 function buildApiCandidatePayload(c, { includeResume = true } = {}) {
   // Extract stable SEEK profile UUID from profileUrl (?selected=UUID)
   const _seekIdMatch = (c.profileUrl || "").match(/[?&]selected=([0-9a-f-]{36})/i);
@@ -2012,20 +2043,11 @@ function buildApiCandidatePayload(c, { includeResume = true } = {}) {
   };
 
   if (includeResume && c.resumeLocalPath && fs.existsSync(c.resumeLocalPath)) {
-    const buf = fs.readFileSync(c.resumeLocalPath);
-    const trial = {
-      ...payload,
-      resumeBase64: buf.toString("base64"),
-      resumeFileName: path.basename(c.resumeLocalPath),
-      resumeMimeType: guessResumeMimeType(path.basename(c.resumeLocalPath)),
-    };
-    if (payloadByteSize(trial) <= VERCEL_SINGLE_CANDIDATE_MAX_BYTES) {
-      Object.assign(payload, {
-        resumeBase64: trial.resumeBase64,
-        resumeFileName: trial.resumeFileName,
-        resumeMimeType: trial.resumeMimeType,
-      });
-    }
+    const resumeUrl = copyResumeToAtsServer(c.resumeLocalPath);
+    c.resumeUrl = resumeUrl;
+    payload.resumeUrl = resumeUrl;
+  } else {
+    payload.resumeUrl = c.resumeUrl || null;
   }
 
   return payload;
@@ -2077,9 +2099,14 @@ async function postCandidateBatchWith413Fallback(batch) {
 }
 
 async function sendToNuanuATS(candidates) {
-  const unsent = dedupeCandidates(candidates.filter((c) => (
-    !c.imported || (c._seekDetailsBackfillNeeded && hasAnySeekDetailSections(c))
-  )));
+  const unsent = dedupeCandidates(candidates.filter((c) => {
+    if (!c.imported) return true;
+    if (!c._seekDetailsBackfillNeeded) return false;
+    if (!hasAnySeekDetailSections(c)) {
+      console.log(`🔁 FORCE UPDATE: ${c.name || "Unknown"} (DB is empty, re-importing)`);
+    }
+    return true;
+  }));
   if (unsent.length === 0) {
     const pendingBackfill = candidates.filter((c) => c._seekDetailsBackfillNeeded).length;
     if (pendingBackfill > 0) {
@@ -2095,7 +2122,7 @@ async function sendToNuanuATS(candidates) {
   ).length;
   console.log(`\n📤 Sending ${unsent.length} candidates to Nuanu ATS...`);
   if (withResume > 0) {
-    console.log(`  📎 Including ${withResume} resume file(s) for Supabase upload`);
+    console.log(`  📎 Copying ${withResume} resume file(s) to ATS public uploads`);
   }
 
   const apiCandidates = unsent.map(buildApiCandidatePayload);
@@ -2111,10 +2138,10 @@ async function sendToNuanuATS(candidates) {
 
     try {
       const result = await postCandidateBatchWith413Fallback(batch);
-      const backfillPayloads = batch.filter(hasCareerHistoryData).length;
+      const backfillPayloads = batch.filter((c) => c._seekDetailsBackfillNeeded || hasCareerHistoryData(c)).length;
       const skippedCount = result.results?.skipped ?? 0;
       if (backfillPayloads > 0 && skippedCount > 0) {
-        console.log(`  🔁 UPDATE: ${Math.min(backfillPayloads, skippedCount)} existing candidate(s) sent with non-empty career history`);
+        console.log(`  🔁 UPDATE: ${Math.min(backfillPayloads, skippedCount)} existing candidate(s) sent for SEEK profile backfill`);
       }
       console.log(
         `  ✅ Batch ${i + 1}: ${result.results?.imported ?? 0} imported, ${skippedCount} skipped, ${result.results?.errors ?? 0} errors`,
