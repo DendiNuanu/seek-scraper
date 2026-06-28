@@ -1854,6 +1854,20 @@ export function extractCareerHistoryFromDetail() {
     return count;
   }
 
+  function isLikelyCareerEntryContainer(el, lines, titleText) {
+    if (!el) return false;
+    var tag = (el.tagName || "").toLowerCase();
+    if (["li", "article", "section"].indexOf(tag) >= 0) return true;
+    if (el.querySelector("h3, h4, h5, h6, strong, b")) return true;
+    if (el.children && el.children.length >= 2 && lines.length <= 6) return true;
+    var normalizedTitle = normalizedLine(titleText);
+    var normalizedBlock = normalizedLine((el.textContent || "").slice(0, 200));
+    if (normalizedTitle && normalizedBlock && normalizedTitle !== normalizedBlock && lines.length <= 6) {
+      return true;
+    }
+    return false;
+  }
+
   var allElements = Array.from(container.querySelectorAll("h1, h2, h3, h4, h5, h6, strong, b, div, section, article, li"));
   var foundCareerSection = false;
 
@@ -1876,16 +1890,18 @@ export function extractCareerHistoryFromDetail() {
     }
     if (!foundCareerSection) continue;
     if (!txt || txt.length < 5) continue;
-    if (!dateRangePattern.test(txt) && !yearRangePattern.test(txt)) continue;
 
     // Parent containers often contain multiple sibling entries; parse smaller children instead.
     if (countDateMatches(txt) > 1) continue;
 
     var lines = txt.split("\n").map(function(s) { return s.trim(); }).filter(Boolean);
     if (lines.length < 2) continue;
+    if (lines.length > 8) continue;
 
     var titleEl = el.querySelector("h3, h4, h5, h6, strong, [data-cy*='title'], [aria-label*='title'], [data-automation*='title'], [data-automation*='position']");
     var title = titleEl ? (titleEl.textContent || "").trim() : (lines[0] || "");
+    if (!isLikelyCareerEntryContainer(el, lines, title)) continue;
+    if (/^(more|show more|lihat lebih|see more)$/i.test(title)) continue;
     var company = "";
     var dates = "";
     var description = "";
@@ -1923,8 +1939,10 @@ export function extractCareerHistoryFromDetail() {
     }
     description = deduplicateText(descLines.join(" ")) || null;
 
-    if (title) {
+    if (title && company) {
       var compactTitle = title.replace(/\s+/g, " ").trim();
+      if (compactTitle.length > 120) continue;
+      if (company.length > 120) continue;
       var titleDateMatch = compactTitle.match(dateRangePattern) || compactTitle.match(yearRangePattern);
       if (titleDateMatch) {
         if (!dates) dates = titleDateMatch[0];

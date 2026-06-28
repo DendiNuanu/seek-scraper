@@ -1996,7 +1996,11 @@ function payloadByteSize(payload) {
 
 function copyResumeToAtsServer(resumeLocalPath) {
   const localFileName = path.basename(resumeLocalPath);
-  const targetPath = `/root/Nuanu_HR_Recruitment_ATS/public/uploads/resumes/${localFileName}`;
+  // IMPORTANT: must match Nginx `location /uploads/` alias (/var/www/nuanu-uploads/)
+  // AND ATS .env UPLOAD_DIR=/var/www/nuanu-uploads/resumes
+  // (previously pointed at /root/Nuanu_HR_Recruitment_ATS/public/uploads/resumes/
+  //  which Nginx does NOT serve -> SCP'd files 404'd)
+  const targetPath = `/var/www/nuanu-uploads/resumes/${localFileName}`;
 
   try {
     execFileSync(
@@ -2253,6 +2257,7 @@ async function main() {
         await sendToNuanuATS(deduped);
         saveScrapeCheckpoint(candidatesToEnrich, cp.lastPage || 0);
       } else {
+        const deduped = SCRAPER_CONFIG.scrapeOnly ? candidatesToEnrich : validCandidates;
         console.log(`\n✅ Done. ${deduped.length} candidates in checkpoint (SCRAPE_ONLY).`);
       }
     } finally {
