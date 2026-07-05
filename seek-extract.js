@@ -1707,6 +1707,104 @@ export function extractCareerHistoryFromDetail() {
   var container = getSectionContainer(careerHeading);
   if (!container) return results;
 
+  // ── Structured extraction (SEEK's actual DOM layout) ───────────────────
+  // Each career entry is a direct child <div> of the entries wrapper (sibling
+  // of the heading). Within each entry:
+  //   <span>(title) <span>(company) <time>(dates) <div>(description)
+  // The description appears twice (visible + aria-hidden duplicate) — we
+  // remove aria-hidden elements before extracting text.
+  (function structuredCareerExtraction() {
+    if (!careerHeading || !container) return;
+    var entriesWrapper = careerHeading.nextElementSibling;
+    while (entriesWrapper && entriesWrapper.tagName !== 'DIV' && entriesWrapper.tagName !== 'UL') {
+      entriesWrapper = entriesWrapper.nextElementSibling;
+    }
+    if (!entriesWrapper) {
+      var kids = Array.from(container.children);
+      for (var ki = 0; ki < kids.length; ki++) {
+        if (kids[ki].tagName === 'DIV' && kids[ki].children.length >= 2) {
+          entriesWrapper = kids[ki];
+          break;
+        }
+      }
+    }
+    if (!entriesWrapper) return;
+
+    var entryDivs = Array.from(entriesWrapper.children).filter(function(el) {
+      return el.tagName === 'DIV' || el.tagName === 'LI' || el.tagName === 'ARTICLE';
+    });
+    if (entryDivs.length === 0) return;
+
+    for (var sei = 0; sei < entryDivs.length; sei++) {
+      var entryEl = entryDivs[sei];
+      var directKids = Array.from(entryEl.children);
+      var spans = directKids.filter(function(c) { return c.tagName === 'SPAN'; });
+      var times = directKids.filter(function(c) { return c.tagName === 'TIME'; });
+
+      var sTitle = '';
+      var sCompany = '';
+      var sDates = '';
+      var sDescription = '';
+
+      if (spans.length >= 1) {
+        // Title may be nested (career history wraps title in ekdkwf0 > ekdkwf2)
+        var titleSpan = spans[0];
+        var innerSpan = titleSpan.querySelector('span');
+        sTitle = ((innerSpan ? innerSpan.textContent : titleSpan.textContent) || '')
+          .replace(/\s+/g, ' ').trim();
+      }
+      if (spans.length >= 2) {
+        sCompany = (spans[1].textContent || '').replace(/\s+/g, ' ').trim();
+      }
+      if (times.length >= 1) {
+        sDates = (times[0].textContent || '').replace(/\s+/g, ' ').trim();
+      }
+
+      // Description: clone entry, remove aria-hidden duplicates + toggle buttons
+      var clone = entryEl.cloneNode(true);
+      var hiddenEls = clone.querySelectorAll('[aria-hidden="true"]');
+      for (var hi = 0; hi < hiddenEls.length; hi++) hiddenEls[hi].remove();
+      var toggleEls = clone.querySelectorAll('[role="button"]');
+      for (var tei = 0; tei < toggleEls.length; tei++) {
+        var toggleText = (toggleEls[tei].textContent || '').replace(/\s+/g, ' ').trim();
+        if (/^(less|more)/i.test(toggleText)) toggleEls[tei].remove();
+      }
+      // Extract text from leaf divs (divs that don't contain other divs)
+      var leafDivs = clone.querySelectorAll('div');
+      var descParts = [];
+      for (var ldi = 0; ldi < leafDivs.length; ldi++) {
+        var ld = leafDivs[ldi];
+        if (ld.querySelector('div')) continue;
+        var ldText = (ld.textContent || '').replace(/\s+/g, ' ').trim();
+        if (ldText && ldText.length > 5 && descParts.indexOf(ldText) < 0) {
+          descParts.push(ldText);
+        }
+      }
+      sDescription = descParts.join(' ') || null;
+      if (sDescription) sDescription = removeDuplicateSentences(sDescription);
+
+      // Clean toggle text from all fields
+      sTitle = sTitle.replace(/(less|more)\s*\u2060?/gi, '').trim();
+      sCompany = sCompany.replace(/(less|more)\s*\u2060?/gi, '').trim();
+
+      if (!sTitle || sTitle.length < 2 || sTitle.length > 200) continue;
+      if (/^(less|more|show more|see more|lihat lebih)/i.test(sTitle)) continue;
+      if (/^[•\-\*]/.test(sTitle)) continue;
+
+      results.push({
+        title: sTitle,
+        company: sCompany || null,
+        dates: sDates || null,
+        description: sDescription
+      });
+    }
+  })();
+
+  if (results.length > 0) {
+    return dedupeCareerHistory(results);
+  }
+  // Fall through to heuristic extraction if structured path found nothing.
+
   var dateRangePattern = /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s*[-–—]\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Current|Present|Sekarang|Now|Saat ini)\s*\d{0,4}/i;
   var yearRangePattern = /\d{4}\s*[-–—]\s*(\d{4}|Current|Present|Sekarang|Now|Saat ini)/i;
   var nextSectionHeadings = ["education", "pendidikan", "licences", "licenses", "sertifikasi", "application questions", "skills", "keahlian"];
@@ -2151,6 +2249,100 @@ export function extractEducationFromDetail() {
 
   var container = getSectionContainer(eduHeading);
   if (!container) return results;
+
+  // ── Structured extraction (SEEK's actual DOM layout) ───────────────────
+  // Each education entry is a direct child <div> of the entries wrapper.
+  // Within each entry:
+  //   <span>(degree) <span>(institution) <span>(status/year) <div>(description)
+  // The description appears twice (visible + aria-hidden duplicate) — we
+  // remove aria-hidden elements before extracting text.
+  (function structuredEducationExtraction() {
+    if (!eduHeading || !container) return;
+    var entriesWrapper = eduHeading.nextElementSibling;
+    while (entriesWrapper && entriesWrapper.tagName !== 'DIV' && entriesWrapper.tagName !== 'UL') {
+      entriesWrapper = entriesWrapper.nextElementSibling;
+    }
+    if (!entriesWrapper) {
+      var kids = Array.from(container.children);
+      for (var ki = 0; ki < kids.length; ki++) {
+        if (kids[ki].tagName === 'DIV' && kids[ki].children.length >= 2) {
+          entriesWrapper = kids[ki];
+          break;
+        }
+      }
+    }
+    if (!entriesWrapper) return;
+
+    var entryDivs = Array.from(entriesWrapper.children).filter(function(el) {
+      return el.tagName === 'DIV' || el.tagName === 'LI' || el.tagName === 'ARTICLE';
+    });
+    if (entryDivs.length === 0) return;
+
+    for (var sei = 0; sei < entryDivs.length; sei++) {
+      var entryEl = entryDivs[sei];
+      var directKids = Array.from(entryEl.children);
+      var spans = directKids.filter(function(c) { return c.tagName === 'SPAN'; });
+
+      var sDegree = '';
+      var sInstitution = '';
+      var sStatus = '';
+      var sDescription = '';
+
+      if (spans.length >= 1) {
+        sDegree = (spans[0].textContent || '').replace(/\s+/g, ' ').trim();
+      }
+      if (spans.length >= 2) {
+        sInstitution = (spans[1].textContent || '').replace(/\s+/g, ' ').trim();
+      }
+      if (spans.length >= 3) {
+        sStatus = (spans[2].textContent || '').replace(/\s+/g, ' ').trim();
+      }
+
+      // Description: clone entry, remove aria-hidden duplicates + toggle buttons
+      var clone = entryEl.cloneNode(true);
+      var hiddenEls = clone.querySelectorAll('[aria-hidden="true"]');
+      for (var hi = 0; hi < hiddenEls.length; hi++) hiddenEls[hi].remove();
+      var toggleEls = clone.querySelectorAll('[role="button"]');
+      for (var tei = 0; tei < toggleEls.length; tei++) {
+        var toggleText = (toggleEls[tei].textContent || '').replace(/\s+/g, ' ').trim();
+        if (/^(less|more)/i.test(toggleText)) toggleEls[tei].remove();
+      }
+      // Extract text from leaf divs (divs that don't contain other divs)
+      var leafDivs = clone.querySelectorAll('div');
+      var descParts = [];
+      for (var ldi = 0; ldi < leafDivs.length; ldi++) {
+        var ld = leafDivs[ldi];
+        if (ld.querySelector('div')) continue;
+        var ldText = (ld.textContent || '').replace(/\s+/g, ' ').trim();
+        if (ldText && ldText.length > 5 && descParts.indexOf(ldText) < 0) {
+          descParts.push(ldText);
+        }
+      }
+      sDescription = descParts.join(' ') || null;
+      if (sDescription) sDescription = deduplicateText(sDescription);
+
+      // Clean toggle text from all fields
+      sDegree = sDegree.replace(/(less|more)\s*\u2060?/gi, '').trim();
+      sInstitution = sInstitution.replace(/(less|more)\s*\u2060?/gi, '').trim();
+      sStatus = sStatus.replace(/(less|more)\s*\u2060?/gi, '').trim();
+
+      if (!sDegree || sDegree.length < 2) continue;
+      if (/^(less|more|show more|see more|lihat lebih)/i.test(sDegree)) continue;
+      if (isApplicationQuestionHeading(sDegree) || hasApplicationQuestionBlob(sDegree)) continue;
+
+      results.push({
+        degree: sDegree,
+        institution: sInstitution || null,
+        status: sStatus || null,
+        description: sDescription
+      });
+    }
+  })();
+
+  if (results.length > 0) {
+    return dedupeEducation(results);
+  }
+  // Fall through to heuristic extraction if structured path found nothing.
 
   var dateRangePattern = /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s*[-–—]\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Current|Present|Sekarang|Now|Saat ini)\s*\d{0,4}/i;
   var yearPattern = /\d{4}/;
@@ -2747,6 +2939,101 @@ export function extractLicencesAndCertificationsFromDetail() {
 
   var container = getSectionContainer(licHeading);
   if (!container) return results;
+
+  // ── Structured extraction (SEEK's actual DOM layout) ───────────────────
+  // Each licence entry is a direct child <div> of the entries wrapper.
+  // Within each entry:
+  //   <span>(name) <span>(issuing body) <span>(dates)
+  // Some entries also have a <div>(description) after the dates.
+  (function structuredLicencesExtraction() {
+    if (!licHeading || !container) return;
+    var entriesWrapper = licHeading.nextElementSibling;
+    while (entriesWrapper && entriesWrapper.tagName !== 'DIV' && entriesWrapper.tagName !== 'UL') {
+      entriesWrapper = entriesWrapper.nextElementSibling;
+    }
+    if (!entriesWrapper) {
+      var kids = Array.from(container.children);
+      for (var ki = 0; ki < kids.length; ki++) {
+        if (kids[ki].tagName === 'DIV' && kids[ki].children.length >= 2) {
+          entriesWrapper = kids[ki];
+          break;
+        }
+      }
+    }
+    if (!entriesWrapper) return;
+
+    var entryDivs = Array.from(entriesWrapper.children).filter(function(el) {
+      return el.tagName === 'DIV' || el.tagName === 'LI' || el.tagName === 'ARTICLE';
+    });
+    if (entryDivs.length === 0) return;
+
+    for (var sei = 0; sei < entryDivs.length; sei++) {
+      var entryEl = entryDivs[sei];
+      var directKids = Array.from(entryEl.children);
+      var spans = directKids.filter(function(c) { return c.tagName === 'SPAN'; });
+      var times = directKids.filter(function(c) { return c.tagName === 'TIME'; });
+
+      var sName = '';
+      var sOrganization = '';
+      var sDates = '';
+      var sDescription = '';
+
+      if (spans.length >= 1) {
+        sName = (spans[0].textContent || '').replace(/\s+/g, ' ').trim();
+      }
+      if (spans.length >= 2) {
+        sOrganization = (spans[1].textContent || '').replace(/\s+/g, ' ').trim();
+      }
+      // Dates: prefer <time> element, else 3rd span
+      if (times.length >= 1) {
+        sDates = (times[0].textContent || '').replace(/\s+/g, ' ').trim();
+      } else if (spans.length >= 3) {
+        sDates = (spans[2].textContent || '').replace(/\s+/g, ' ').trim();
+      }
+
+      // Description: clone entry, remove aria-hidden duplicates + toggle buttons
+      var clone = entryEl.cloneNode(true);
+      var hiddenEls = clone.querySelectorAll('[aria-hidden="true"]');
+      for (var hi = 0; hi < hiddenEls.length; hi++) hiddenEls[hi].remove();
+      var toggleEls = clone.querySelectorAll('[role="button"]');
+      for (var tei = 0; tei < toggleEls.length; tei++) {
+        var toggleText = (toggleEls[tei].textContent || '').replace(/\s+/g, ' ').trim();
+        if (/^(less|more)/i.test(toggleText)) toggleEls[tei].remove();
+      }
+      // Extract text from leaf divs (divs that don't contain other divs)
+      var leafDivs = clone.querySelectorAll('div');
+      var descParts = [];
+      for (var ldi = 0; ldi < leafDivs.length; ldi++) {
+        var ld = leafDivs[ldi];
+        if (ld.querySelector('div')) continue;
+        var ldText = (ld.textContent || '').replace(/\s+/g, ' ').trim();
+        if (ldText && ldText.length > 5 && descParts.indexOf(ldText) < 0) {
+          descParts.push(ldText);
+        }
+      }
+      sDescription = descParts.join(' ') || null;
+
+      // Clean toggle text from all fields
+      sName = sName.replace(/(less|more)\s*\u2060?/gi, '').trim();
+      sOrganization = sOrganization.replace(/(less|more)\s*\u2060?/gi, '').trim();
+      sDates = sDates.replace(/(less|more)\s*\u2060?/gi, '').trim();
+
+      if (!sName || sName.length < 2) continue;
+      if (/^(less|more|show more|see more|lihat lebih)/i.test(sName)) continue;
+
+      results.push({
+        name: sName,
+        organization: sOrganization || null,
+        dates: sDates || null,
+        description: sDescription
+      });
+    }
+  })();
+
+  if (results.length > 0) {
+    return dedupeLicences(results);
+  }
+  // Fall through to heuristic extraction if structured path found nothing.
 
   var dateRangePattern = /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s*[-–—]\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Current|Present|Sekarang|Now|Saat ini)\s*\d{0,4}/i;
   var yearRangePattern = /\d{4}\s*[-–—]\s*(\d{4}|Current|Present|Sekarang|Now|Saat ini)/i;

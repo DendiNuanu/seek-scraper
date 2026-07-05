@@ -6,3 +6,10 @@ seek-session-storage.json
 debug-screenshot.png
 downloads/
 scrape-checkpoint.json
+
+# Test/diagnostic output artifacts
+test-single-candidate-output.json
+diagnose-dom-output.json
+*-checkpoint.json
+*.bak.*
+*.log

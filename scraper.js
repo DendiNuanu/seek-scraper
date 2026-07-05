@@ -204,6 +204,158 @@ async function dismissSeekOverlays(page) {
   }
 }
 
+/**
+ * Random delay in the inclusive range [minMs, maxMs].
+ * Used to humanise the cadence between "More" toggle clicks and between
+ * candidates so SEEK's bot detection sees natural, jittered timing.
+ */
+function randomDelay(minMs, maxMs) {
+  const ms = Math.floor(minMs + Math.random() * (maxMs - minMs + 1));
+  return delay(ms);
+}
+
+/**
+ * Expand every "More⁠"/"Show more"/"Lihat lebih"/"See more" toggle inside the
+ * candidate detail panel so that full (untruncated) descriptions are rendered
+ * before the DOM extractors run.
+ *
+ * SEEK renders truncated previews with a "More⁠" button (the trailing char is
+ * U+2060 WORD JOINER, invisible but present in textContent). Clicking it
+ * swaps the button to "Less⁠" and reveals the full text. We click every
+ * visible "More"-style button we can find, with a small random delay between
+ * clicks (500–1500ms) to avoid triggering bot detection.
+ *
+ * This is idempotent: clicking an already-expanded section is a no-op because
+ * the button text has changed to "Less⁠" and no longer matches our selector.
+ *
+ * Returns the number of toggles that were clicked.
+ */
+async function expandSeekProfileSections(page) {
+  // Selector matches buttons whose visible text starts with "More" (EN),
+  // "Lihat lebih" (ID), "Show more", or "See more" — case-insensitive.
+  // We use text filtering in JS rather than :has-text() so we can also strip
+  // the invisible U+2060 WORD JOINER that SEEK appends to the label.
+  const clicked = await page.evaluate(async () => {
+    const MORE_PATTERNS = [
+      /^more\s*\u2060?$/i,
+      /^show more\s*\u2060?$/i,
+      /^see more\s*\u2060?$/i,
+      /^lihat lebih\s*\u2060?$/i,
+      /^lihat lebih banyak\s*\u2060?$/i,
+      /^selengkapnya\s*\u2060?$/i,
+    ];
+    const isMoreButton = (el) => {
+      if (!el || el.tagName !== "BUTTON" && el.getAttribute("role") !== "button") return false;
+      const raw = (el.textContent || "").trim();
+      if (!raw) return false;
+      // Strip U+2060 WORD JOINER and surrounding whitespace for matching.
+      const cleaned = raw.replace(/\u2060/g, "").trim();
+      return MORE_PATTERNS.some((re) => re.test(cleaned));
+    };
+
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    let count = 0;
+    // Loop because expanding one section can lazy-render another "More" below it.
+    for (let pass = 0; pass < 5; pass++) {
+      const buttons = Array.from(
+        document.querySelectorAll('button, [role="button"]'),
+      ).filter(isMoreButton);
+      if (buttons.length === 0) break;
+      for (const btn of buttons) {
+        // Only click if still visible & enabled.
+        const rect = btn.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        if (btn.disabled) continue;
+        btn.scrollIntoView({ block: "center", behavior: "instant" });
+        await sleep(120);
+        btn.click();
+        count += 1;
+        // Random 500–1500ms between expand-clicks to look human.
+        await sleep(500 + Math.floor(Math.random() * 1001));
+      }
+    }
+    return count;
+  }).catch((err) => {
+    console.log(`      ⚠️ expandSeekProfileSections evaluate failed: ${err.message}`);
+    return 0;
+  });
+
+  if (clicked > 0) {
+    console.log(`      🔽 Expanded ${clicked} "More" toggle(s) in profile panel`);
+    // Give SEEK a moment to render the newly-expanded text.
+    await randomDelay(400, 900);
+  }
+  return clicked;
+}
+
+/**
+ * Normalise the per-section arrays on a candidate so the field names match what
+ * the ATS-side parsers in lib/profile-data.ts expect. This fixes three silent
+ * data-loss bugs where the scraper emitted the right VALUE under the wrong KEY:
+ *
+ *   1. Career history: scraper emits `dates` (e.g. "Jan 2020 — Present").
+ *      ATS parser only reads `startDate`/`endDate`. → split `dates` into both.
+ *   2. Education: scraper emits `status` (e.g. "Finished 2020").
+ *      ATS parser reads `yearCompleted`. → extract the 4-digit year.
+ *   3. Licences: scraper emits `organization` (American spelling).
+ *      ATS parser reads `issuingOrganisation|issuingBody|organisation|issuer`
+ *      (no alias for `organization`). → copy to `issuingOrganisation`.
+ *
+ * This is non-destructive: original keys are preserved for backward compat.
+ */
+function normaliseSeekSectionsForAts(c) {
+  // 1. Career history: dates → startDate / endDate
+  if (Array.isArray(c.careerHistory)) {
+    c.careerHistory = c.careerHistory.map((entry) => {
+      if (!entry || typeof entry !== "object") return entry;
+      if (entry.startDate || entry.endDate) return entry; // already split
+      const dates = entry.dates || entry.dateRange || null;
+      if (!dates || typeof dates !== "string") return entry;
+      // SEEK formats: "Jan 2020 — Present", "2020 — 2022",
+      // "Jan 2020 – Present", "01/2020 - 03/2022", "2020–Present"
+      const parts = dates
+        .split(/\s*[—–-]\s*/) // em dash, en dash, hyphen
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (parts.length >= 2) {
+        return { ...entry, startDate: parts[0], endDate: parts[1] };
+      }
+      if (parts.length === 1) {
+        // Single date (no end) — treat as start.
+        return { ...entry, startDate: parts[0] };
+      }
+      return entry;
+    });
+  }
+
+  // 2. Education: status → yearCompleted
+  if (Array.isArray(c.education)) {
+    c.education = c.education.map((entry) => {
+      if (!entry || typeof entry !== "object") return entry;
+      if (entry.yearCompleted) return entry; // already set
+      const status = entry.status || null;
+      if (!status || typeof status !== "string") return entry;
+      // Extract a 4-digit year (e.g. "Finished 2020" → "2020").
+      const m = status.match(/\b(19|20)\d{2}\b/);
+      if (m) return { ...entry, yearCompleted: m[0] };
+      return entry;
+    });
+  }
+
+  // 3. Licences: organization → issuingOrganisation
+  if (Array.isArray(c.licencesAndCertifications)) {
+    c.licencesAndCertifications = c.licencesAndCertifications.map((entry) => {
+      if (!entry || typeof entry !== "object") return entry;
+      if (entry.issuingOrganisation || entry.issuingBody) return entry; // already set
+      const org = entry.organization || entry.organisation || entry.issuer || null;
+      if (!org) return entry;
+      return { ...entry, issuingOrganisation: org };
+    });
+  }
+
+  return c;
+}
+
 async function scrapeOneListPage(page, context, pageNum, network) {
   const url = SEEK.yourCandidatesPage(pageNum);
   console.log(`📄 Page ${pageNum}/${SCRAPER_CONFIG.maxPages}: ${url}`);
@@ -1096,8 +1248,21 @@ async function captureProfileDetails(page, candidate, network) {
     console.log(`      💰 IDR ${salaryFinal.toLocaleString('id-ID')} / month`);
   }
 
+  // ── Expand "More⁠"/"Less⁠" toggles so full descriptions are rendered ──
+  // SEEK truncates long career-history / licence descriptions behind a
+  // "More⁠" button (U+2060 WORD JOINER suffix). Clicking it reveals the full
+  // text. We do this BEFORE extraction so the DOM extractors see complete
+  // content. Idempotent + per-click random delay (500–1500ms) for anti-bot.
+  try {
+    await expandSeekProfileSections(page);
+  } catch (err) {
+    console.log(`      ⚠️ expandSeekProfileSections failed (continuing): ${err.message}`);
+  }
+
   // ── Extract 5 additional detail sections from the candidate profile ──
   // Each call runs page.evaluate and returns an array (empty if section missing).
+  // Per-section try/catch ensures one failure never aborts the whole candidate;
+  // every section falls back to [] so downstream code never sees null/undefined.
 
   try {
     const careerHistory = await page.evaluate(extractCareerHistoryFromDetail).catch(() => []);
@@ -2022,6 +2187,14 @@ function buildApiCandidatePayload(c, { includeResume = true } = {}) {
   const _seekIdMatch = (c.profileUrl || "").match(/[?&]selected=([0-9a-f-]{36})/i);
   const seekProfileId = _seekIdMatch ? _seekIdMatch[1] : null;
 
+  // Normalise per-section field names to match the ATS-side parsers in
+  // lib/profile-data.ts. Fixes 3 silent data-loss bugs:
+  //   • careerHistory.dates  → startDate / endDate
+  //   • education.status     → yearCompleted
+  //   • licences.organization → issuingOrganisation
+  // Non-destructive: original keys are preserved for backward compatibility.
+  normaliseSeekSectionsForAts(c);
+
   const payload = {
     name: c.name,
     email: c.email,
@@ -2039,6 +2212,10 @@ function buildApiCandidatePayload(c, { includeResume = true } = {}) {
     // FIX: salary fields — set by captureProfileDetails() from SEEK profile tab
     expectedSalaryRaw: c.expectedSalaryRaw || null,
     salaryExpectation: c.salaryExpectation || null,
+    // Section arrays — field names already normalised by normaliseSeekSectionsForAts()
+    // so the ATS parsers (parseSeekCareerHistory / parseSeekEducation /
+    // parseSeekLicences / parseSeekApplicationQuestions / extractSkills) read
+    // every value without silent drops.
     careerHistory: c.careerHistory || [],
     education: c.education || [],
     licencesAndCertifications: c.licencesAndCertifications || [],
@@ -2370,4 +2547,21 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+// Export helpers for test scripts (e.g. test-single-candidate.js).
+// Only run main() when scraper.js is executed directly (not imported).
+export {
+  expandSeekProfileSections,
+  randomDelay,
+  normaliseSeekSectionsForAts,
+  buildApiCandidatePayload,
+  captureProfileDetails,
+  enrichFromProfileUrl,
+  withProfileTab,
+  attachNetworkSniffer,
+  SCRAPER_CONFIG,
+};
+
+const __isMain = import.meta.url === `file://${process.argv[1]}`;
+if (__isMain) {
+  main().catch(console.error);
+}
