@@ -354,6 +354,58 @@ export function extractYourCandidatesFromDom() {
     return m ? m[0] : new Date().toISOString();
   };
 
+  /**
+   * Convert a SEEK relative-time string ("9 hours ago", "2 days ago",
+   * "yesterday", "today") into an ABSOLUTE ISO timestamp, using the moment
+   * the list page is READ as the reference "now".
+   *
+   * CRITICAL: This runs inside page.evaluate() — i.e. in the browser at the
+   * exact moment the SEEK list DOM is parsed. By pre-computing the absolute
+   * timestamp HERE, we completely decouple it from later POST/import timing
+   * (which can be delayed by profile enrichment, resume downloads, network
+   * retries, 502 errors, etc.). Without this, "9 hours ago" would be
+   * computed as POST_time - 9h instead of list_read_time - 9h, producing
+   * inconsistent timestamps that break sort order.
+   *
+   * @param {string} relative - e.g. "9 hours ago", "1 day ago", "yesterday"
+   * @param {Date} scrapeStartTime - captured ONCE at the top of
+   *   extractYourCandidatesFromDom() so every candidate on the page uses the
+   *   same reference "now" (guarantees consistent relative ordering).
+   * @returns {string} ISO 8601 timestamp
+   */
+  const relativeToAbsoluteAppliedAt = (relative, scrapeStartTime) => {
+    const now = scrapeStartTime || new Date();
+    if (!relative) return now.toISOString();
+
+    const s = String(relative).toLowerCase().trim();
+    if (s === "today") return now.toISOString();
+    if (s === "yesterday") {
+      const d = new Date(now);
+      d.setDate(d.getDate() - 1);
+      return d.toISOString();
+    }
+
+    const m = s.match(
+      /(\d+)\s*(minute|hour|day|week|month|year)s?\s*ago/i,
+    );
+    if (m) {
+      const n = parseInt(m[1], 10);
+      const unit = (m[2] || "").toLowerCase();
+      const d = new Date(now);
+      if (unit.startsWith("minute")) d.setMinutes(d.getMinutes() - n);
+      else if (unit.startsWith("hour")) d.setHours(d.getHours() - n);
+      else if (unit.startsWith("day")) d.setDate(d.getDate() - n);
+      else if (unit.startsWith("week")) d.setDate(d.getDate() - n * 7);
+      else if (unit.startsWith("month")) d.setMonth(d.getMonth() - n);
+      else if (unit.startsWith("year")) d.setFullYear(d.getFullYear() - n);
+      return d.toISOString();
+    }
+
+    // Already an ISO string or unparseable — return as-is (or now if empty)
+    const parsed = new Date(relative);
+    return Number.isNaN(parsed.getTime()) ? now.toISOString() : parsed.toISOString();
+  };
+
   const isLikelyPersonName = (name) => {
     if (!name || name.length < 3) return false;
     if (/^(South|West|North|East|Sarjana|Diploma|Magister|Bali|Jakarta)/i.test(name)) return false;
@@ -361,9 +413,14 @@ export function extractYourCandidatesFromDom() {
     const words = name.trim().split(/\s+/).filter(Boolean);
     if (words.length < 2) return false;
     if (!/[a-zA-Z]/.test(name)) return false;
-    // SEEK sometimes shows a trailing initial only (e.g. "Feri Budi p")
+    // SEEK sometimes shows a trailing initial only (e.g. "Feri Budi p").
+    // Also accept names where the surname is a single-letter initial
+    // (e.g. "Gerrich W") — at least one substantial word (length > 1)
+    // plus a single-letter alphabetic initial. This fixes the bug where
+    // candidates with initial-only surnames were silently dropped.
     const core = words.filter((w) => w.length > 1);
-    return core.length >= 2;
+    const initials = words.filter((w) => w.length === 1 && /[a-zA-Z]/.test(w));
+    return core.length >= 2 || (core.length >= 1 && initials.length >= 1);
   };
 
   const findRowContainer = (phoneLink) => {
@@ -386,7 +443,54 @@ export function extractYourCandidatesFromDom() {
   const results = [];
   const seen = new Set();
 
-  // Process rows top-to-bottom (newest applications appear first on SEEK)
+  // Capture scrapeStartTime ONCE at the top of extraction so every candidate
+  // on this page uses the SAME reference "now". This guarantees consistent
+  // relative ordering (e.g. "9 hours ago" is always exactly 1h newer than
+  // "10 hours ago" on the same page). Without a single capture point, each
+  // candidate would get a slightly different `new Date()` (microseconds
+  // apart), which is functionally equivalent but obscures the intent and
+  // makes the per-candidate log harder to verify.
+  const scrapeStartTime = new Date();
+
+  // ---------------------------------------------------------------------------
+  // Row discovery — TWO strategies so we capture candidates regardless of
+  // whether SEEK exposes a phone link in the list view.
+  //
+  // Strategy A (primary): phone links (a[href^="tel:"]).
+  //   - Works for candidates whose contact details are visible in the list.
+  //
+  // Strategy B (fallback): profile links (a[href*="selected="]).
+  //   - Captures "New" status candidates (just applied, not yet opened) whose
+  //     phone is NOT exposed in the list view. Without this, candidates like
+  //     "Gerrich W" (status "New") are silently dropped.
+  //
+  // Each strategy produces a list of { anchor, container } pairs. We merge
+  // them, dedupe by container element, and process top-to-bottom.
+  // ---------------------------------------------------------------------------
+
+  /** Find the row container for a profile anchor (mirrors findRowContainer
+   *  but keys off status words + relative-time text instead of "+62"). */
+  const findRowContainerForProfile = (anchor) => {
+    let el = anchor.parentElement;
+    for (let depth = 0; depth < 12 && el; depth++) {
+      const text = el.innerText || "";
+      const hasStatus = statusWords.some((s) => text.includes(s));
+      const hasRelativeTime = /\d+\s*(minute|hour|day|week|month)s?\s*ago|yesterday|today/i.test(text);
+      if (
+        hasStatus &&
+        hasRelativeTime &&
+        text.length < 1200 &&
+        text.length > 30
+      ) {
+        return el;
+      }
+      el = el.parentElement;
+    }
+    return anchor.parentElement?.parentElement || anchor.parentElement;
+  };
+
+  // Strategy A: phone links
+  const phoneRows = [];
   const phoneLinks = [...document.querySelectorAll('a[href^="tel:"]')]
   .map((link) => {
     const rect = link.getBoundingClientRect();
@@ -395,21 +499,51 @@ export function extractYourCandidatesFromDom() {
   .sort((a, b) => a.top - b.top || a.left - b.left)
   .map((x) => x.link);
 
-  for (let rowIndex = 0; rowIndex < phoneLinks.length; rowIndex++) {
-    const phoneLink = phoneLinks[rowIndex];
+  for (const phoneLink of phoneLinks) {
     const container = findRowContainer(phoneLink);
+    if (container) phoneRows.push({ container, phoneLink, top: phoneLink.getBoundingClientRect().top });
+  }
+
+  // Strategy B: profile links (fallback for candidates without phone in list)
+  const profileRows = [];
+  const profileLinks = [...document.querySelectorAll('a[href*="selected="]')]
+  .map((link) => {
+    const rect = link.getBoundingClientRect();
+    return { link, top: rect.top, left: rect.left };
+  })
+  .sort((a, b) => a.top - b.top || a.left - b.left)
+  .map((x) => x.link);
+
+  // Track containers already covered by Strategy A so we don't double-process
+  const coveredContainers = new Set(phoneRows.map((r) => r.container));
+  for (const profileLink of profileLinks) {
+    const container = findRowContainerForProfile(profileLink);
+    if (container && !coveredContainers.has(container)) {
+      profileRows.push({ container, phoneLink: null, top: profileLink.getBoundingClientRect().top });
+      coveredContainers.add(container);
+    }
+  }
+
+  // Merge both strategies, sorted top-to-bottom by vertical position
+  const allRows = [...phoneRows, ...profileRows].sort((a, b) => a.top - b.top);
+
+  for (let rowIndex = 0; rowIndex < allRows.length; rowIndex++) {
+    const { container, phoneLink } = allRows[rowIndex];
     if (!container) {
-      console.log(`      [DIAGNOSTIC] No container found for phone: ${phoneLink.textContent?.trim() || phoneLink.getAttribute('href')?.trim()}`);
+      console.log(`      [DIAGNOSTIC] No container found for row ${rowIndex}`);
       continue;
     }
 
     const rowText = (container.innerText || "").trim();
     const phone =
-    phoneLink.textContent?.trim() ||
-    phoneLink.getAttribute("href")?.replace(/^tel:/i, "").trim() ||
+    phoneLink?.textContent?.trim() ||
+    phoneLink?.getAttribute("href")?.replace(/^tel:/i, "").trim() ||
     null;
 
-    if (!phone || !/\+?\d{8,}/.test(phone.replace(/\s/g, ""))) continue;
+    // For Strategy A rows, validate the phone. For Strategy B rows (no phone
+    // link), phone is null — we accept the row as long as we can extract a
+    // valid name and a profileUrl (so the enrich phase can still open it).
+    if (phoneLink && (!phone || !/\+?\d{8,}/.test(phone.replace(/\s/g, "")))) continue;
 
     const lines = rowText
     .split("\n")
@@ -417,18 +551,20 @@ export function extractYourCandidatesFromDom() {
     .filter((s) => s.length > 0 && !isJunkLine(s));
 
     let name = null;
-    const phoneIdx = lines.findIndex((l) => l.includes(phone.replace(/\s/g, "")) || l === phone);
-    if (phoneIdx > 0) {
-      for (let i = phoneIdx - 1; i >= 0; i--) {
-        const candidate = lines[i];
-        if (
+    if (phone) {
+      const phoneIdx = lines.findIndex((l) => l.includes(phone.replace(/\s/g, "")) || l === phone);
+      if (phoneIdx > 0) {
+        for (let i = phoneIdx - 1; i >= 0; i--) {
+          const candidate = lines[i];
+          if (
           candidate.length > 3 &&
           candidate.length < 80 &&
           !/^[A-Z]$/.test(candidate) &&
           !isJunkLine(candidate)
-        ) {
-          name = candidate;
-          break;
+          ) {
+            name = candidate;
+            break;
+          }
         }
       }
     }
@@ -454,7 +590,7 @@ export function extractYourCandidatesFromDom() {
     }
     name = name.replace(/\s+/g, " ");
 
-    const key = `${name}|${phone.replace(/\D/g, "")}`;
+    const key = `${name}|${(phone || "").replace(/\D/g, "")}`;
     if (seen.has(key)) continue;
     seen.add(key);
 
@@ -469,6 +605,24 @@ export function extractYourCandidatesFromDom() {
     const jobIdMatch = (profileUrl || rowText).match(/[?&]jobId?=(\d+)/i);
     const jobId = jobIdMatch ? jobIdMatch[1] : null;
 
+    // Capture the RAW SEEK relative-time text for logging/verification.
+    const appliedAtRaw = parseRelativeTime(rowText);
+    // Pre-compute ABSOLUTE ISO at list-read time (browser context) so the
+    // timestamp reflects when the candidate applied on SEEK, NOT when the
+    // scraper later POSTs to the ATS (which can be delayed by enrichment/
+    // retries). parseRelativeTime() returns the raw "X hours ago" text;
+    // relativeToAbsoluteAppliedAt() converts it to ISO using scrapeStartTime
+    // (captured ONCE at the top of this function) as the reference "now".
+    const appliedAtIso = relativeToAbsoluteAppliedAt(appliedAtRaw, scrapeStartTime);
+
+    // Per-candidate log so the operator can VERIFY the parsing is correct
+    // BEFORE data is posted to the ATS. Shows: name, raw SEEK text, parsed
+    // absolute timestamp. This is the proof that "X hours ago" is being
+    // converted to scrapeStartTime - Xh (not POST_time - Xh).
+    console.log(
+      `      [APPLIED_AT] ${name} | SEEK: "${appliedAtRaw}" | parsed: ${appliedAtIso} | phone: ${phone || "(none)"}`,
+    );
+
     results.push({
       name,
       phone,
@@ -476,13 +630,19 @@ export function extractYourCandidatesFromDom() {
       seekStatus,
       mostRecentRole: mostRecentRole || null,
       appliedRole,
-      appliedAt: parseRelativeTime(rowText),
-                 appliedAtSort: rowIndex,
-                 profileUrl,
-                 jobId,
-                 source: "SEEK",
-                 location: null,
-                 domicile: null,
+      appliedAt: appliedAtIso,
+      appliedAtRaw,
+      appliedAtSort: rowIndex,
+      // Original row position in the SEEK candidate list (top-to-bottom).
+      // Used as a secondary sort tie-breaker in the ATS when multiple
+      // candidates share the same appliedAt timestamp (SEEK only gives
+      // "2 days ago" granularity, producing identical timestamps).
+      listPosition: rowIndex,
+      profileUrl,
+      jobId,
+      source: "SEEK",
+      location: null,
+      domicile: null,
     });
   }
 
@@ -1350,6 +1510,9 @@ export function extractCandidateCardsFromDom(jobTitle) {
   ];
   const results = [];
   const seen = new Set();
+  // Capture scrapeStartTime ONCE so every card on the page uses the same
+  // reference "now" (consistent relative ordering).
+  const scrapeStartTime = new Date();
 
   const pushCard = (card) => {
     const text = (card.innerText || "").trim();
@@ -1382,7 +1545,12 @@ export function extractCandidateCardsFromDom(jobTitle) {
     const appliedMatch = text.match(
       /Applied\s+(\d+\s+\w+\s+ago|yesterday|today|\d+\s+minutes?\s+ago)/i,
     );
-    const appliedAt = appliedMatch ? appliedMatch[0] : new Date().toISOString();
+    // Pre-compute ABSOLUTE ISO at list-read time (browser context) so the
+    // timestamp reflects when the candidate applied on SEEK, NOT when the
+    // scraper later POSTs to the ATS (which can be delayed by retries).
+    const appliedAt = appliedMatch
+      ? relativeToAbsoluteAppliedAt(appliedMatch[0], scrapeStartTime)
+      : scrapeStartTime.toISOString();
 
     const profileLink = card.querySelector('a[href*="selected="], a[href*="candidate"]');
 

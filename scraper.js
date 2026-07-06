@@ -104,17 +104,32 @@ function candidateKey(c) {
   const email = (c.email || "").toLowerCase().trim();
   const phone = (c.phone || "").replace(/\D/g, "");
   const name = (c.name || "").toLowerCase().trim();
-  return `${name}|${phone}|${email}`;
+  // Include profileUrl in the key when phone is absent so that "New" status
+  // candidates (no phone in list view) are still deduped correctly across
+  // pages without being collapsed onto a different candidate with the same
+  // name but a different profile.
+  const profileUrl = (c.profileUrl || "").toLowerCase().trim();
+  return `${name}|${phone}|${email}|${profileUrl}`;
 }
 
 function isValidYourCandidatesRow(c) {
-  if (!c?.name || !c?.phone) return false;
+  // Name is always required.
+  if (!c?.name) return false;
   const name = c.name.trim();
   if (name.length < 4) return false;
   if (/^(South|West|North|East|Sarjana|Diploma|Magister)\b/i.test(name)) return false;
   if (/,\s*\d{4}|@\s*/.test(name)) return false;
-  const digits = (c.phone || "").replace(/\D/g, "");
-  if (digits.length < 10) return false;
+
+  // Phone is required ONLY when there is no profileUrl fallback. "New" status
+  // candidates (just applied, not yet opened by recruiter) often do NOT expose
+  // a phone link in the SEEK list view. We accept them as long as we have a
+  // profileUrl so the enrich phase can still open their profile to fetch
+  // contact details. This fixes BUG 2: candidates like "Gerrich W" (status
+  // "New") were being silently dropped because they had no phone link.
+  const hasPhone = c.phone && (c.phone || "").replace(/\D/g, "").length >= 10;
+  const hasProfileUrl = !!c.profileUrl;
+  if (!hasPhone && !hasProfileUrl) return false;
+
   if (c.appliedRole) {
     const role = c.appliedRole.trim();
     if (role.length >= 50) return false;
@@ -374,6 +389,18 @@ async function scrapeOneListPage(page, context, pageNum, network) {
 
   const pageCandidates = await page.evaluate(extractYourCandidatesFromDom);
   console.log(`  Found ${pageCandidates.length} candidates on page ${pageNum}`);
+
+  // Per-candidate log so the operator can VERIFY the appliedAt parsing is
+  // correct BEFORE data is posted to the ATS. Shows: name, status, raw SEEK
+  // relative-time text, parsed absolute ISO timestamp, phone presence.
+  // This is the proof that "X hours ago" → scrapeStartTime - Xh (not
+  // POST_time - Xh). Review these lines in the terminal before running
+  // `turbo-enrich` (which POSTs to the ATS).
+  for (const c of pageCandidates) {
+    console.log(
+      `    • ${c.name} [${c.seekStatus}] | SEEK: "${c.appliedAtRaw || "?"}" | appliedAt: ${c.appliedAt} | phone: ${c.phone ? "yes" : "NO (profile-only)"}`,
+    );
+  }
 
   // Merge network API data (location, email, profileUrl) into DOM candidates.
   // SEEK API responses contain location/domicile that the DOM extraction misses.
@@ -2181,6 +2208,18 @@ function copyResumeToAtsServer(resumeLocalPath) {
   }
 }
 
+/**
+ * Detect whether a string looks like an ISO 8601 timestamp (e.g.
+ * "2026-07-06T00:30:00.000Z") rather than a SEEK relative-time string
+ * (e.g. "9 hours ago"). Used to decide whether to pass appliedAt through
+ * directly (pre-computed at extraction time) or convert it (legacy data).
+ */
+function isIsoLike(value) {
+  if (!value || typeof value !== "string") return false;
+  // ISO 8601: YYYY-MM-DDTHH:MM:SS... or YYYY-MM-DD
+  return /^\d{4}-\d{2}-\d{2}([T\s]\d{2}:\d{2})?/.test(value.trim());
+}
+
 /** Attach server-local resume URL; do not send base64 to the old Supabase upload path. */
 function buildApiCandidatePayload(c, { includeResume = true } = {}) {
   // Extract stable SEEK profile UUID from profileUrl (?selected=UUID)
@@ -2202,7 +2241,17 @@ function buildApiCandidatePayload(c, { includeResume = true } = {}) {
     appliedRole: c.appliedRole,
     mostRecentRole: c.mostRecentRole,
     seekStatus: c.seekStatus,
-    appliedAt: parseRelativeAppliedAtToIso(c.appliedAt),
+    // appliedAt is now pre-computed as an ABSOLUTE ISO string at list-read
+    // time (inside page.evaluate in seek-extract.js). Pass it through
+    // directly to preserve the exact extraction-time timestamp.
+    // Fallback: for old checkpoint data that still has relative text
+    // ("9 hours ago"), convert it here (uses POST time as base — less
+    // accurate, but only affects legacy data).
+    appliedAt: isIsoLike(c.appliedAt) ? c.appliedAt : parseRelativeAppliedAtToIso(c.appliedAt),
+    // Original row position in the SEEK candidate list (top-to-bottom).
+    // Used by the ATS as a secondary sort tie-breaker when multiple
+    // candidates share the same appliedAt timestamp.
+    listPosition: typeof c.listPosition === "number" ? c.listPosition : c.appliedAtSort ?? null,
     profileUrl: c.profileUrl,
     source: c.source,
     location: c.location || null,
