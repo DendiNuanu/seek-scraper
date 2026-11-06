@@ -12,6 +12,7 @@ import {
   safeGoto,
 } from "./seek-auth.js";
 import fs from "fs";
+import crypto from "node:crypto";
 import { execFileSync } from "child_process";
 import {
   clickYourCandidatesRowByPhone,
@@ -603,7 +604,9 @@ async function enrichCheckpointCandidates(context, candidates, network) {
         if (SCRAPER_CONFIG.importOnTheFly && !SCRAPER_CONFIG.scrapeOnly) {
           pendingImportCandidates.push(candidate);
           if (pendingImportCandidates.length >= SCRAPER_CONFIG.importBatchSize) {
-            await flushPendingImports();
+            // Do NOT auto-flush pending ATS imports on SIGINT: resumes may not be uploaded yet.
+    // Checkpoint already saved by caller; exit without sending false resumeUrl payloads.
+    pendingImportCandidates = [];
           }
         }
         if (done % 10 === 0) {
@@ -624,7 +627,9 @@ async function enrichCheckpointCandidates(context, candidates, network) {
   );
 
   if (SCRAPER_CONFIG.importOnTheFly && !SCRAPER_CONFIG.scrapeOnly) {
-    await flushPendingImports();
+    // Do NOT auto-flush pending ATS imports on SIGINT: resumes may not be uploaded yet.
+    // Checkpoint already saved by caller; exit without sending false resumeUrl payloads.
+    pendingImportCandidates = [];
   }
 
   saveScrapeCheckpoint(candidates, loadScrapeCheckpoint()?.lastPage || 0);
@@ -1602,7 +1607,9 @@ async function enrichCandidatesViaJobPipelines(page, context, candidates, networ
         if (SCRAPER_CONFIG.importOnTheFly && !SCRAPER_CONFIG.scrapeOnly) {
           pendingImportCandidates.push(candidate);
           if (pendingImportCandidates.length >= SCRAPER_CONFIG.importBatchSize) {
-            await flushPendingImports();
+            // Do NOT auto-flush pending ATS imports on SIGINT: resumes may not be uploaded yet.
+    // Checkpoint already saved by caller; exit without sending false resumeUrl payloads.
+    pendingImportCandidates = [];
           }
         }
       } catch (err) {
@@ -2081,7 +2088,9 @@ function setupSigintHandler() {
 
     try {
       const flushPromise = (async () => {
-        await flushPendingImports();
+        // Do NOT auto-flush pending ATS imports on SIGINT: resumes may not be uploaded yet.
+    // Checkpoint already saved by caller; exit without sending false resumeUrl payloads.
+    pendingImportCandidates = [];
         await delay(500);
       })();
 
@@ -2186,26 +2195,84 @@ function payloadByteSize(payload) {
   return Buffer.byteLength(JSON.stringify(payload), "utf8");
 }
 
-function copyResumeToAtsServer(resumeLocalPath) {
-  const localFileName = path.basename(resumeLocalPath);
-  // IMPORTANT: must match Nginx `location /uploads/` alias (/var/www/nuanu-uploads/)
-  // AND ATS .env UPLOAD_DIR=/var/www/nuanu-uploads/resumes
-  // (previously pointed at /root/Nuanu_HR_Recruitment_ATS/public/uploads/resumes/
-  //  which Nginx does NOT serve -> SCP'd files 404'd)
-  const targetPath = `/var/www/nuanu-uploads/resumes/${localFileName}`;
-
-  try {
-    execFileSync(
-      "scp",
-      [resumeLocalPath, `root@168.144.36.41:${targetPath}`],
-      { timeout: 30000, stdio: "ignore" },
-    );
-    console.log(`      📎 Resume uploaded to server: ${localFileName}`);
-    return `https://hr-ats.nuanu.site/uploads/resumes/${encodeURIComponent(localFileName)}`;
-  } catch (err) {
-    console.log(`      ⚠ Resume SCP failed: ${err.message}`);
-    return null;
+function safeFileName(name) {
+  const extMatch = String(name).match(/\.(pdf|docx|doc)$/i);
+  const ext = extMatch ? extMatch[0].toLowerCase() : "";
+  const base = ext ? name.slice(0, -ext.length) : name;
+  let safe = base
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  const hash = crypto.createHash("sha1").update(name).digest("hex").slice(0, 6);
+  safe = `${safe}_${hash}${ext}`;
+  if (safe.length > 120) {
+    const keep = 120 - ext.length - 8;
+    safe = safe.slice(0, keep) + "_" + hash + ext;
   }
+  return safe;
+}
+
+function atsSshConfig() {
+  const host = process.env.ATS_SSH_HOST || "172.16.252.218";
+  const user = process.env.ATS_SSH_USER || "hr-ats-proxmox";
+  const port = process.env.ATS_SSH_PORT || "22";
+  const key = (process.env.ATS_SSH_KEY || "~/.ssh/id_ed25519").replace(/^~/, process.env.HOME || "");
+  const remoteDir = (process.env.ATS_REMOTE_RESUME_DIR || "/var/www/nuanu-uploads/resumes").replace(/\/+$/, "");
+  const sshOpts = [
+    "-i", key,
+    "-p", port,
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=10",
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "ServerAliveInterval=15",
+  ];
+  return { host, user, port, key, remoteDir, sshOpts, target: `${user}@${host}` };
+}
+
+function runSsh(args, timeoutMs) {
+  return execFileSync("ssh", args, { timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"] });
+}
+
+function runRsync(args, timeoutMs) {
+  return execFileSync("rsync", args, { timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"] });
+}
+
+function copyResumeToAtsServer(resumeLocalPath) {
+  const cfg = atsSshConfig();
+  const localFileName = path.basename(resumeLocalPath);
+  const safeName = safeFileName(localFileName);
+  const remotePath = `${cfg.remoteDir}/${safeName}`;
+  const remoteTarget = `${cfg.target}:${remotePath}`;
+  const sshRemoteCmd = cfg.sshOpts.concat([cfg.target, `test -w ${JSON.stringify(cfg.remoteDir)}`]);
+
+  const attempts = 3;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      // Ensure remote dir writable
+      execFileSync("ssh", sshRemoteCmd, { timeout: 15000, stdio: ["ignore", "pipe", "pipe"] });
+      // Use rsync single connection-friendly; fallback scp
+      const rsyncArgs = [
+        "-az", "--partial",
+        "-e", `ssh -i ${cfg.key} -p ${cfg.port} -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15`,
+        resumeLocalPath,
+        remoteTarget,
+      ];
+      execFileSync("rsync", rsyncArgs, { timeout: 60000, stdio: ["ignore", "pipe", "pipe"] });
+      console.log(`      📎 Resume uploaded to server: ${safeName}`);
+      const base = (process.env.NUANU_RESUME_BASE_URL || "https://hr.ats.new.nuanu.site/uploads/resumes").replace(/\/+$/, "");
+      return `${base}/${encodeURIComponent(safeName)}`;
+    } catch (err) {
+      const stderr = err?.stderr ? err.stderr.toString() : "";
+      console.log(`      ⚠ Resume upload failed (attempt ${attempt}/${attempts}): ${err.message}${stderr ? " | stderr: " + stderr.trim() : ""}`);
+      if (attempt < attempts) {
+        const backoff = attempt * 2000;
+        execFileSync("sleep", [String(backoff / 1000)], { stdio: "ignore" });
+      }
+    }
+  }
+  return null;
 }
 
 /**
@@ -2218,6 +2285,120 @@ function isIsoLike(value) {
   if (!value || typeof value !== "string") return false;
   // ISO 8601: YYYY-MM-DDTHH:MM:SS... or YYYY-MM-DD
   return /^\d{4}-\d{2}-\d{2}([T\s]\d{2}:\d{2})?/.test(value.trim());
+}
+
+const DEPT_KEYWORDS = [
+  { keys: ["finance","financial","controller","treasury","cfo","budget","accounting","tax","audit"], dept: "Finance" },
+  { keys: ["hr","recruit","talent","people"], dept: "HR" },
+  { keys: ["it","software","developer","network","devops","data"], dept: "IT" },
+  { keys: ["marketing","brand","content","social media"], dept: "Marketing" },
+  { keys: ["sales","business development"], dept: "Sales" },
+  { keys: ["operations","logistic","procurement","supply"], dept: "Operations" },
+];
+
+async function fetchDepartments() {
+  const origin = new URL(process.env.NUANU_API_URL).origin;
+  const key = process.env.NUANU_API_KEY;
+  const res = await fetch(origin + "/api/departments", { headers: { "x-api-key": key } });
+  if (!res.ok) throw new Error("departments fetch failed " + res.status);
+  const data = await res.json();
+  const list = Array.isArray(data) ? data : (data.departments || data.data || []);
+  return list.filter((d) => {
+    if (!d || !d.id || !d.name) return false;
+    const name = String(d.name).trim();
+    const lower = name.toLowerCase();
+    if (lower === "general") return false;
+    if (/test|smoke|deployment/i.test(lower)) return false;
+    if (d.isActive === false) return false;
+    if (d.deletedAt) return false;
+    return true;
+  });
+}
+
+function mapPositionToDepartment(position, departments) {
+  const lower = (position || "").toLowerCase();
+  let targetDeptName = null;
+  for (const rule of DEPT_KEYWORDS) {
+    if (rule.keys.some((k) => lower.includes(k))) { targetDeptName = rule.dept; break; }
+  }
+  // match department name
+  const find = (name) => departments.find((d) => d.name.toLowerCase() === (name || "").toLowerCase());
+  if (targetDeptName) {
+    const exact = find(targetDeptName);
+    if (exact) return exact.id;
+    // tolerant contains
+    const tol = departments.find((d) => d.name.toLowerCase().includes(targetDeptName.toLowerCase()) || targetDeptName.toLowerCase().includes(d.name.toLowerCase()));
+    if (tol) return tol.id;
+  }
+  // token overlap
+  const posTokens = lower.split(/[^a-z0-9]+/).filter(Boolean);
+  let best = null, bestScore = 0;
+  for (const d of departments) {
+    const dTokens = d.name.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    const score = dTokens.filter((t) => posTokens.includes(t)).length;
+    if (score > bestScore) { bestScore = score; best = d; }
+  }
+  if (best && bestScore > 0) return best.id;
+  const def = process.env.DEFAULT_DEPARTMENT;
+  if (def) {
+    const d = find(def);
+    if (d) return d.id;
+  }
+  return null;
+}
+
+const REGISTRY_PATH = path.join(__dirname, "created-vacancies.json");
+function loadRegistry() {
+  try { return JSON.parse(fs.readFileSync(REGISTRY_PATH, "utf8")); } catch { return {}; }
+}
+function saveRegistry(r) { fs.writeFileSync(REGISTRY_PATH, JSON.stringify(r, null, 2)); }
+
+async function ensureVacancies(positions) {
+  const dryRun = process.env.DRY_RUN === "true";
+  const departments = await fetchDepartments();
+  const registry = loadRegistry();
+  const results = { created: 0, existing: 0, unmapped: [], failed: [] };
+  const origin = new URL(process.env.NUANU_API_URL).origin;
+  const key = process.env.NUANU_API_KEY;
+  for (const pos of positions) {
+    const deptId = mapPositionToDepartment(pos, departments);
+    if (!deptId) { results.unmapped.push(pos); continue; }
+    const dept = departments.find((d) => d.id === deptId);
+    if (registry[pos]) { results.existing++; continue; }
+    if (dryRun) { console.log(`[DRY] would create vacancy "${pos}" in ${dept.name}`); continue; }
+    // try create
+    let attempts = 0;
+    while (attempts < 3) {
+      attempts++;
+      try {
+        const res = await fetch(origin + "/api/vacancies", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-api-key": key },
+          body: JSON.stringify({ title: pos, departmentName: dept.name, status: "draft" }),
+          signal: AbortSignal.timeout(15000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          registry[pos] = { title: pos, departmentId: deptId, vacancyId: data.id, createdAt: new Date().toISOString() };
+          saveRegistry(registry);
+          results.created++;
+          break;
+        }
+        if (res.status === 409) {
+          results.existing++;
+          break;
+        }
+        if (res.status >= 500) throw new Error("server " + res.status);
+        const t = await res.text();
+        results.failed.push({ pos, reason: t });
+        break;
+      } catch (err) {
+        if (attempts >= 3) { results.failed.push({ pos, reason: err.message }); break; }
+        await new Promise((r) => setTimeout(r, attempts * 2000));
+      }
+    }
+  }
+  return results;
 }
 
 /** Attach server-local resume URL; do not send base64 to the old Supabase upload path. */
@@ -2403,7 +2584,7 @@ async function sendToNuanuATS(candidates) {
   console.log(`  ⏭️  Skipped:   ${totalSkipped}`);
   console.log(`  ❌ Errors:    ${totalErrors}`);
   console.log("\n🎉 Done! Check your dashboard:");
-  console.log("   https://hr-ats.nuanu.site/dashboard/candidates");
+  console.log("   ${origin}/candidates");
 
   if (totalErrors === 0) {
     for (const c of unsent) {
@@ -2427,7 +2608,25 @@ function logCandidateNames(candidates) {
   }
 }
 
+async function preflightAts() {
+  if (SCRAPER_CONFIG.scrapeOnly) return;
+  const cfg = atsSshConfig();
+  try {
+    execFileSync("ssh", cfg.sshOpts.concat([cfg.target, `test -w ${cfg.remoteDir}`]), { timeout: 15000, stdio: ["ignore", "pipe", "pipe"] });
+  } catch (err) {
+    const stderr = err?.stderr ? err.stderr.toString().trim() : err.message;
+    console.error(`❌ Preflight SSH failed: ${stderr}`);
+    process.exit(1);
+  }
+  try {
+    const url = SCRAPER_CONFIG.nuanuApiUrl;
+    if (url) await fetch(url, { method: "HEAD" }).catch(() => {});
+  } catch {}
+  console.log(`✅ Preflight OK: SSH ${cfg.target} writable ${cfg.remoteDir}`);
+}
+
 async function main() {
+  await preflightAts();
   if (SCRAPER_CONFIG.turboEnrich) {
     const cpPath = SCRAPER_CONFIG.turboEnrichCheckpoint;
     console.log("⚡ PHASE 2 — Enrich checkpoint (email, location, resume)");
@@ -2475,11 +2674,21 @@ async function main() {
       saveScrapeCheckpoint(candidatesToEnrich, cp.lastPage || 0);
       // FIX: Send all candidates to ATS, even if they lack email/location
       // The ATS should handle missing fields gracefully
-      const validCandidates = candidatesToEnrich.filter((c) => c.name && c.phone && c.phone.replace(/\D/g, '').length >= 10);
+      let validCandidates = candidatesToEnrich.filter((c) => c.name && c.phone && c.phone.replace(/\D/g, '').length >= 10);
+      if (process.env.LIMIT) {
+        const n = parseInt(process.env.LIMIT, 10);
+        validCandidates = validCandidates.slice(0, n);
+      }
       console.log(`  Sending ${validCandidates.length}/${candidatesToEnrich.length} candidates to ATS`);
 
       if (!SCRAPER_CONFIG.scrapeOnly && validCandidates.length > 0) {
-        const deduped = dedupeCandidates(validCandidates);
+        const positions = [...new Set(validCandidates.map((c) => c.appliedRole).filter(Boolean))];
+        const er = await ensureVacancies(positions);
+        console.log(`Vacancies: created=${er.created} existing=${er.existing} unmapped=${er.unmapped.length}`);
+        if (er.unmapped.length) console.log("UNMAPPED positions:", er.unmapped);
+        // filter out unmapped candidates
+        const mapped = validCandidates.filter((c) => !er.unmapped.includes(c.appliedRole));
+        const deduped = dedupeCandidates(mapped);
         await sendToNuanuATS(deduped);
         saveScrapeCheckpoint(candidatesToEnrich, cp.lastPage || 0);
       } else {
@@ -2492,6 +2701,7 @@ async function main() {
     return;
   }
 
+  await preflightAts();
   console.log("🚀 SEEK → Nuanu ATS Scraper Starting...");
   if (TURBO_MODE) {
     console.log("⚡ TURBO MODE — Phase 1 list fast; then run: npm run turbo-enrich");
