@@ -13,6 +13,7 @@ import {
 } from "./seek-auth.js";
 import fs from "fs";
 import crypto from "node:crypto";
+import os from "node:os";
 import { execFileSync } from "child_process";
 import {
   clickYourCandidatesRowByPhone,
@@ -110,7 +111,7 @@ function candidateKey(c) {
   // pages without being collapsed onto a different candidate with the same
   // name but a different profile.
   const profileUrl = (c.profileUrl || "").toLowerCase().trim();
-  return `${name}|${phone}|${email}|${profileUrl}`;
+  return `${name}|${phone}|${email}|${profileUrl}|${String(c.appliedRole || "").trim().toLowerCase()}`;
 }
 
 function isValidYourCandidatesRow(c) {
@@ -156,16 +157,44 @@ async function gotoSeekPage(page, url) {
   await delay(SCRAPER_CONFIG.delayMs);
 }
 
+// CVSAFE_PS_V4 - preserve imported applications across turbo-full runs
+function seekId(c) {
+  const value = String(c?.seekProfileId || "").trim().toLowerCase();
+  if (/^[0-9a-f-]{36}$/.test(value)) return value;
+  try { return new URL(c?.profileUrl || "").searchParams.get("selected")?.toLowerCase() || ""; }
+  catch { return ""; }
+}
+function sameApplication(a, b) {
+  const ra = String(a.appliedRole || "").trim().toLowerCase();
+  const rb = String(b.appliedRole || "").trim().toLowerCase();
+  if (ra && rb && ra !== rb) return false;
+  const ia = seekId(a), ib = seekId(b);
+  if (ia && ib) return ia === ib;
+  const na = String(a.name || "").toLowerCase().trim().replace(/\s+/g, " ");
+  const nb = String(b.name || "").toLowerCase().trim().replace(/\s+/g, " ");
+  if (!ra || !rb || !na || na !== nb) return false;
+  const da = Date.parse(a.appliedAt || ""), db = Date.parse(b.appliedAt || "");
+  if (Number.isFinite(da) && Number.isFinite(db) && Math.abs(da - db) > 259200000) return false;
+  const pa = String(a.phone || "").replace(/\D/g, "");
+  const pb = String(b.phone || "").replace(/\D/g, "");
+  if (pa.length >= 10 && pb.length >= 10 && pa === pb) return true;
+  const ea = String(a.email || "").trim().toLowerCase();
+  const eb = String(b.email || "").trim().toLowerCase();
+  return Boolean(ea && eb && ea === eb);
+}
 function mergeCandidates(target, incoming) {
-  const seen = new Set(target.map((c) => candidateKey(c)));
   for (const c of incoming) {
-    const key = candidateKey(c);
-    if (!c.name || seen.has(key)) continue;
-    seen.add(key);
-    target.push(c);
+    if (!c?.name) continue;
+    const old = target.find(x => sameApplication(x,c));
+    if (!old) { target.push(c); continue; }
+    if (!old.imported) {
+      for (const [k,v] of Object.entries(c)) {
+        if (["imported","resumeLocalPath","resumeUrl","appliedAt"].includes(k)) continue;
+        if (v !== null && v !== undefined && v !== "") old[k] = v;
+      }
+    }
   }
 }
-
 async function logDomDiagnostics(page, context) {
   const diag = await page
   .evaluate(() => {
@@ -467,25 +496,22 @@ async function scrapeOneListPage(page, context, pageNum, network) {
 async function scrapeCandidatesPage(page, context, network) {
   let candidates = [];
   let consecutiveEmpty = 0;
+  let pagesSeen = 0;
 
-  const checkpoint = SCRAPER_CONFIG.resumeCheckpoint ? loadScrapeCheckpoint() : null;
-  let pageNum = SCRAPER_CONFIG.startPage;
-
+  const checkpoint = loadScrapeCheckpoint();
+  if (fs.existsSync(CHECKPOINT_PATH) && !Array.isArray(checkpoint?.candidates)) {
+    throw new Error("Invalid existing checkpoint; refusing to overwrite it");
+  }
   if (checkpoint?.candidates?.length) {
     candidates = checkpoint.candidates;
-    pageNum = (checkpoint.lastPage || SCRAPER_CONFIG.startPage) + 1;
-    console.log(
-      `  📂 Resuming checkpoint: ${candidates.length} candidates, starting at page ${pageNum}`,
-    );
+    console.log(`  Preserving ${candidates.length} previous checkpoint rows`);
   }
-
-  console.log("📋 Scraping https://id.employer.seek.com/your-candidates?page=N");
-  console.log(
-    `  Pages: ${pageNum}–${SCRAPER_CONFIG.maxPages}` +
-    (SCRAPER_CONFIG.maxAgeMonths > 0
-    ? ` (stop after ~${SCRAPER_CONFIG.maxAgeMonths} months)`
-    : ""),
-  );
+  let pageNum = SCRAPER_CONFIG.startPage;
+  if (SCRAPER_CONFIG.resumeCheckpoint && checkpoint?.candidates?.length) {
+    pageNum = (checkpoint.lastPage || SCRAPER_CONFIG.startPage) + 1;
+  }
+  console.log("SEEK your-candidates list; preserving imported flags");
+  console.log(`  Pages: ${pageNum}-${SCRAPER_CONFIG.maxPages}`);
   if (SCRAPER_CONFIG.parallelListPages > 1) {
     console.log(`  ⚡ Parallel list tabs: ${SCRAPER_CONFIG.parallelListPages}`);
   }
@@ -541,6 +567,7 @@ async function scrapeCandidatesPage(page, context, network) {
         continue;
       }
       consecutiveEmpty = 0;
+      pagesSeen++;
       mergeCandidates(candidates, result.withinWindow);
       saveScrapeCheckpoint(candidates, num);
 
@@ -556,7 +583,7 @@ async function scrapeCandidatesPage(page, context, network) {
     pageNum = batchNums[batchNums.length - 1] + 1;
     if (stopRun) break;
   }
-
+  if (pagesSeen === 0) throw new Error("SEEK list returned zero usable pages; aborting safely");
   return candidates;
 }
 
@@ -960,7 +987,7 @@ async function downloadResumeFromModal(page, candidateName) {
     return dest;
   } catch (err) {
     console.log(`      ⚠️  Resume download failed: ${err.message}`);
-    return null;
+    return false;
   }
 }
 
@@ -1346,7 +1373,10 @@ async function captureProfileDetails(page, candidate, network) {
 
   if (!SCRAPER_CONFIG.skipResume) {
     const resumePath = await downloadResumeFromModal(page, candidate.name);
-    if (resumePath) {
+    if (resumePath === false) {
+      candidate.resumeDownloadFailed = true;
+    } else if (resumePath) {
+      delete candidate.resumeDownloadFailed;
       candidate.resumeLocalPath = resumePath;
       console.log(`      📎 Resume: ${path.basename(resumePath)}`);
     }
@@ -1583,7 +1613,7 @@ async function enrichCandidatesViaJobPipelines(page, context, candidates, networ
   let enriched = 0;
 
   for (const [role, jobId] of roleJobMap) {
-    const roleCandidates = candidates.filter((c) => c.appliedRole === role && !c.email);
+    const roleCandidates = candidates.filter((c) => !c.imported && c.appliedRole === role && !c.email);
     if (roleCandidates.length === 0) continue;
 
     console.log(
@@ -1905,6 +1935,7 @@ function hasNoSeekDetailSections(c) {
 
 /** ATS needs: email, phone (list), domicile, resume file, expected salary, SEEK profile details */
 function needsProfileEnrich(c) {
+  if (c.imported) return false;
   // `salaryExpectation` is set by captureProfileDetails when the SEEK profile
   // contains an "Expected monthly salary" screening question. Treat a missing
   // salary as a reason to re-open the profile so we backfill the ATS field.
@@ -1987,22 +2018,13 @@ async function attachNetworkSniffer(page, network) {
 
 function saveScrapeCheckpoint(candidates, lastPage) {
   if (!SCRAPER_CONFIG.saveCheckpoint) return;
-  fs.writeFileSync(
-    CHECKPOINT_PATH,
-    JSON.stringify(
-      {
-        lastPage,
-        maxAgeMonths: SCRAPER_CONFIG.maxAgeMonths,
-        candidateCount: candidates.length,
-        savedAt: new Date().toISOString(),
-                   candidates,
-      },
-      null,
-      2,
-    ),
-  );
+  const tmp = `${CHECKPOINT_PATH}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify({
+    lastPage, maxAgeMonths: SCRAPER_CONFIG.maxAgeMonths,
+    candidateCount: candidates.length, savedAt: new Date().toISOString(), candidates,
+  }, null, 2));
+  fs.renameSync(tmp, CHECKPOINT_PATH);
 }
-
 function unsentCandidates(candidates) {
   return dedupeCandidates(candidates.filter((c) => !c.imported));
 }
@@ -2154,7 +2176,7 @@ function buildImportBatches(apiCandidates) {
   for (const candidate of apiCandidates) {
     const candidateBytes = Buffer.byteLength(JSON.stringify(candidate), "utf8");
     const wouldExceed =
-    current.length > 0 && currentBytes + candidateBytes > VERCEL_IMPORT_MAX_BYTES;
+    current.length > 0 && (current.length >= 2 || currentBytes + candidateBytes > VERCEL_IMPORT_MAX_BYTES);
 
     if (wouldExceed) {
       batches.push(current);
@@ -2218,7 +2240,11 @@ function atsSshConfig() {
   const host = process.env.ATS_SSH_HOST || "172.16.252.218";
   const user = process.env.ATS_SSH_USER || "hr-ats-proxmox";
   const port = process.env.ATS_SSH_PORT || "22";
-  const key = (process.env.ATS_SSH_KEY || "~/.ssh/id_ed25519").replace(/^~/, process.env.HOME || "");
+  // Use the actual current user's home directory on Windows and Linux.
+  const configuredKey = process.env.ATS_SSH_KEY || "~/.ssh/id_ed25519";
+  const key = /^~[\\/]/.test(configuredKey)
+    ? path.join(os.homedir(), configuredKey.slice(2))
+    : configuredKey;
   const remoteDir = (process.env.ATS_REMOTE_RESUME_DIR || "/var/www/nuanu-uploads/resumes").replace(/\/+$/, "");
   const sshOpts = [
     "-i", key,
@@ -2252,15 +2278,47 @@ function copyResumeToAtsServer(resumeLocalPath) {
     try {
       // Ensure remote dir writable
       execFileSync("ssh", sshRemoteCmd, { timeout: 15000, stdio: ["ignore", "pipe", "pipe"] });
-      // Use rsync single connection-friendly; fallback scp
-      const rsyncArgs = [
-        "-az", "--partial",
-        "-e", `ssh -i ${cfg.key} -p ${cfg.port} -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15`,
-        resumeLocalPath,
+      // Windows ships with OpenSSH scp but not rsync; keep rsync first on Linux.
+      // Use basename + cwd so Windows drive paths (C:\\...) are never mistaken
+      // for the remote-host:path syntax of scp.
+      const scpArgs = [
+        "-i", cfg.key,
+        "-P", cfg.port,
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ServerAliveInterval=15",
+        path.basename(resumeLocalPath),
         remoteTarget,
       ];
-      execFileSync("rsync", rsyncArgs, { timeout: 60000, stdio: ["ignore", "pipe", "pipe"] });
+      const scpOptions = {
+        cwd: path.dirname(resumeLocalPath),
+        timeout: 60000,
+        stdio: ["ignore", "pipe", "pipe"],
+      };
+      if (process.platform === "win32") {
+        execFileSync("scp", scpArgs, scpOptions);
+      } else {
+        const rsyncArgs = [
+          "-az", "--partial",
+          "-e", `ssh -i ${cfg.key} -p ${cfg.port} -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15`,
+          resumeLocalPath,
+          remoteTarget,
+        ];
+        try {
+          execFileSync("rsync", rsyncArgs, { timeout: 60000, stdio: ["ignore", "pipe", "pipe"] });
+        } catch {
+          execFileSync("scp", scpArgs, scpOptions);
+        }
+      }
       console.log(`      📎 Resume uploaded to server: ${safeName}`);
+      const bytes = fs.statSync(resumeLocalPath).size;
+      const remoteQuoted = "'" + remotePath.replace(/'/g, "'\\''") + "'";
+      const actual = runSsh(cfg.sshOpts.concat([cfg.target,
+        `test -f ${remoteQuoted} && wc -c < ${remoteQuoted}`]), 15000).toString().trim();
+      if (bytes <= 0 || Number(actual) !== bytes) {
+        throw new Error(`CV incomplete on server: local=${bytes} remote=${actual}`);
+      }
       const base = (process.env.NUANU_RESUME_BASE_URL || "https://hr.ats.new.nuanu.site/uploads/resumes").replace(/\/+$/, "");
       return `${base}/${encodeURIComponent(safeName)}`;
     } catch (err) {
@@ -2268,7 +2326,8 @@ function copyResumeToAtsServer(resumeLocalPath) {
       console.log(`      ⚠ Resume upload failed (attempt ${attempt}/${attempts}): ${err.message}${stderr ? " | stderr: " + stderr.trim() : ""}`);
       if (attempt < attempts) {
         const backoff = attempt * 2000;
-        execFileSync("sleep", [String(backoff / 1000)], { stdio: "ignore" });
+        // Portable synchronous retry pause; no external `sleep` binary required.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, backoff);
       }
     }
   }
@@ -2403,6 +2462,7 @@ async function ensureVacancies(positions) {
 
 /** Attach server-local resume URL; do not send base64 to the old Supabase upload path. */
 function buildApiCandidatePayload(c, { includeResume = true } = {}) {
+  if (c.resumeDownloadFailed) throw new Error(`Resume download failed for ${c.name}; import stopped`);
   // Extract stable SEEK profile UUID from profileUrl (?selected=UUID)
   const _seekIdMatch = (c.profileUrl || "").match(/[?&]selected=([0-9a-f-]{36})/i);
   const seekProfileId = _seekIdMatch ? _seekIdMatch[1] : null;
@@ -2455,6 +2515,7 @@ function buildApiCandidatePayload(c, { includeResume = true } = {}) {
 
   if (includeResume && c.resumeLocalPath && fs.existsSync(c.resumeLocalPath)) {
     const resumeUrl = copyResumeToAtsServer(c.resumeLocalPath);
+    if (!resumeUrl) throw new Error(`Resume upload failed for ${c.name}; ATS import stopped`);
     c.resumeUrl = resumeUrl;
     payload.resumeUrl = resumeUrl;
   } else {
@@ -2510,14 +2571,7 @@ async function postCandidateBatchWith413Fallback(batch) {
 }
 
 async function sendToNuanuATS(candidates) {
-  const unsent = dedupeCandidates(candidates.filter((c) => {
-    if (!c.imported) return true;
-    if (!c._seekDetailsBackfillNeeded) return false;
-    if (!hasAnySeekDetailSections(c)) {
-      console.log(`🔁 FORCE UPDATE: ${c.name || "Unknown"} (DB is empty, re-importing)`);
-    }
-    return true;
-  }));
+  const unsent = dedupeCandidates(candidates.filter(c => !c.imported));
   if (unsent.length === 0) {
     const pendingBackfill = candidates.filter((c) => c._seekDetailsBackfillNeeded).length;
     if (pendingBackfill > 0) {
@@ -2568,12 +2622,24 @@ async function sendToNuanuATS(candidates) {
         }
       }
 
-      totalImported += result.results?.imported || 0;
-      totalSkipped += result.results?.skipped || 0;
-      totalErrors += result.results?.errors || 0;
+      const imported = result.results?.imported;
+      const skipped = result.results?.skipped;
+      const errors = result.results?.errors;
+      if (![imported,skipped,errors].every(x => Number.isInteger(x) && x >= 0) ||
+          errors !== 0 || imported + skipped !== batch.length) {
+        throw new Error(`Unconfirmed ATS batch ${i + 1}: ${imported}/${skipped}/${errors}`);
+      }
+      const offset = batches.slice(0,i).reduce((n,b) => n+b.length,0);
+      for (const c of unsent.slice(offset, offset+batch.length)) c.imported = true;
+      saveScrapeCheckpoint(currentCheckpointCandidates.length ? currentCheckpointCandidates : candidates,
+        currentCheckpointLastPage || loadScrapeCheckpoint()?.lastPage || 0);
+      totalImported += imported;
+      totalSkipped += skipped;
     } catch (err) {
-      console.error(`  ❌ Batch ${i + 1} failed:`, err.message);
+      console.error(`  Batch ${i + 1} FAILED:`,err.message);
       totalErrors += batch.length;
+      console.error("STOP: Remaining rows stay pending in checkpoint");
+      break;
     }
 
     await delay(1000);
@@ -2583,15 +2649,9 @@ async function sendToNuanuATS(candidates) {
   console.log(`  ✅ Imported:  ${totalImported}`);
   console.log(`  ⏭️  Skipped:   ${totalSkipped}`);
   console.log(`  ❌ Errors:    ${totalErrors}`);
-  console.log("\n🎉 Done! Check your dashboard:");
-  console.log("   ${origin}/candidates");
+  if (totalErrors) { console.error("ATS IMPORT FAILED"); process.exitCode = 1; } else console.log("ATS import completed:");
+  if (!totalErrors) console.log(new URL(SCRAPER_CONFIG.nuanuApiUrl).origin + "/candidates");
 
-  if (totalErrors === 0) {
-    for (const c of unsent) {
-      c.imported = true;
-      delete c._seekDetailsBackfillNeeded;
-    }
-  }
 
   return { importedCount: totalImported, skippedCount: totalSkipped, errorCount: totalErrors };
 }
@@ -2662,7 +2722,7 @@ async function main() {
       const enriched = await enrichCheckpointCandidates(context, candidatesToEnrich, network);
       console.log(`  ✅ Enriched ${enriched} profiles`);
 
-      const stillNeed = candidatesToEnrich.filter((c) => !c.email);
+      const stillNeed = candidatesToEnrich.filter((c) => !c.imported && !c.email);
       if (stillNeed.length > 0) {
         const page = await context.newPage();
         await attachNetworkSniffer(page, network);
@@ -2674,10 +2734,15 @@ async function main() {
       saveScrapeCheckpoint(candidatesToEnrich, cp.lastPage || 0);
       // FIX: Send all candidates to ATS, even if they lack email/location
       // The ATS should handle missing fields gracefully
-      let validCandidates = candidatesToEnrich.filter((c) => c.name && c.phone && c.phone.replace(/\D/g, '').length >= 10);
+      let validCandidates = candidatesToEnrich.filter((c) => !c.imported && c.name && c.phone && c.phone.replace(/\D/g, '').length >= 10);
       if (process.env.LIMIT) {
         const n = parseInt(process.env.LIMIT, 10);
         validCandidates = validCandidates.slice(0, n);
+      }
+      const missingPhone = candidatesToEnrich.filter(c => !c.imported && (!c.phone || c.phone.replace(/\D/g, "").length < 10));
+      if (missingPhone.length) {
+        console.error(`  ${missingPhone.length} new candidates missing phone; kept pending in checkpoint`);
+        process.exitCode = 1;
       }
       console.log(`  Sending ${validCandidates.length}/${candidatesToEnrich.length} candidates to ATS`);
 
@@ -2820,7 +2885,7 @@ export {
   SCRAPER_CONFIG,
 };
 
-const __isMain = import.meta.url === `file://${process.argv[1]}`;
+const __isMain = Boolean(process.argv[1]) && path.resolve(fileURLToPath(import.meta.url)) === path.resolve(process.argv[1]);
 if (__isMain) {
-  main().catch(console.error);
+  main().catch((error) => { console.error(error); process.exitCode = 1; });
 }

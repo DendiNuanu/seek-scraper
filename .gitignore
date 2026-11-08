@@ -13,3 +13,9 @@ diagnose-dom-output.json
 *-checkpoint.json
 *.bak.*
 *.log
+.env.*
+scrape-checkpoint*.json
+created-vacancies.json
+*.bak-*
+debug-screenshot*
+*-output.json
