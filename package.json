@@ -17,7 +17,7 @@
     "turbo-enrich": "node run-env.js TURBO_ENRICH=true ENRICH_CONCURRENCY=4 HEADLESS=false -- scraper.js",
     "turbo-enrich-full": "node run-env.js TURBO_ENRICH=true ENRICH_CONCURRENCY=4 HEADLESS=false -- scraper.js",
     "ui": "node server.js",
-    "turbo-full": "npm run turbo-list && npm run turbo-enrich",
+    "turbo-full": "npm run turbo-list && node skip-bad-seek-row.cjs && npm run turbo-enrich",
     "setup": "npx playwright install chromium",
     "test-api": "node test-api.js",
     "test-single": "node run-env.js HEADLESS=false -- test-single-candidate.js",
